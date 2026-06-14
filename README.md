@@ -85,7 +85,7 @@ Requirements: **IDA Pro 9.x** with idalib · **Python 3.10+** · **Ollama**
 winget install Ollama.Ollama
 
 # pull the model (8.7 GB — go get coffee)
-ollama pull hf.co/gdfhhjk/spectrida-re-gguf
+ollama pull hf.co/gdfhhjk/spectrida-re-gguf:latest
 
 # first run — detects your IDA install and sets everything up
 spectrida onboard
