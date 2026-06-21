@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.2 — the ghost stops naming things "sub_*"
+
+Found by actually testing the AI naming path end-to-end (not just demangling) for the first time
+this release: `[services] llama_model` had no usable default, and the MCP naming pipeline
+(`analyze_binary`/`populate_binary`) would silently no-op without it -- no crash, no warning, just
+quietly skipping the one feature you'd actually notice missing.
+
+- `llama_model_path()` now falls back to the GGUF Ollama already has on disk for whichever model
+  `[ollama] model` names, via `ollama show --modelfile`. Anyone who's done onboarding's
+  `ollama pull hf.co/gdfhhjk/spectrida-re-gguf` step already has the real weights sitting in
+  Ollama's blob store -- no reason the MCP path needed a second, manually-pointed copy.
+- `llama_exe()` now falls back to `llama-server`/`llama-server.exe` on `PATH` if `[services]
+  llama_exe` isn't set.
+- Still genuinely manual: llama.cpp itself isn't bundled, so if you don't have its `llama-server`
+  binary anywhere reachable, you'll need to grab it yourself. The above just means you no longer
+  also have to hunt down and hand-configure a second copy of the model file once you do.
+
 ## 0.2.1 — the ghost actually reads Switch binaries now
 
 0.2.0's NSO support ran without errors and *looked* like it worked, but a real benchmark exposed

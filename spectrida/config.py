@@ -6,7 +6,10 @@ only auto-launches once.
 """
 from __future__ import annotations
 
+import functools
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 try:
@@ -118,11 +121,49 @@ def naming_health_url() -> str:
 
 
 def llama_exe() -> str:
-    return get("services", "llama_exe", "SPECTRIDA_LLAMA_EXE")
+    configured = get("services", "llama_exe", "SPECTRIDA_LLAMA_EXE")
+    if configured and Path(configured).exists():
+        return configured
+    # If llama.cpp's server binary is just sitting on PATH (a manual install,
+    # a package manager, whatever), use that instead of requiring an exact
+    # config.toml path no one's going to remember to set.
+    found = shutil.which("llama-server") or shutil.which("llama-server.exe")
+    return found or configured
+
+
+@functools.lru_cache(maxsize=8)
+def _resolve_ollama_blob(model_name: str) -> str:
+    """Find the raw GGUF Ollama already has on disk for ``model_name``.
+
+    Anyone who's done onboarding's `ollama pull hf.co/gdfhhjk/spectrida-re-gguf`
+    step already has the real weights sitting in Ollama's blob store -- no
+    reason to also require a separate, manually-pointed llama.cpp model file
+    just for the MCP server's naming path. Cached for the process lifetime;
+    the blob a pulled tag points at doesn't change mid-session.
+    """
+    if not shutil.which("ollama"):
+        return ""
+    try:
+        out = subprocess.run(
+            ["ollama", "show", model_name, "--modelfile"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except Exception:
+        return ""
+    for line in out.splitlines():
+        line = line.strip()
+        if line.upper().startswith("FROM "):
+            path = line[5:].strip()
+            if path and Path(path).exists():
+                return path
+    return ""
 
 
 def llama_model_path() -> str:
-    return get("services", "llama_model", "SPECTRIDA_LLAMA_MODEL")
+    configured = get("services", "llama_model", "SPECTRIDA_LLAMA_MODEL")
+    if configured and Path(configured).exists():
+        return configured
+    return _resolve_ollama_blob(ollama_model())
 
 
 def llama_extra_args() -> list[str]:
