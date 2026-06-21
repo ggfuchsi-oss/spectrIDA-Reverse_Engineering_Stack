@@ -106,14 +106,67 @@ def llama_server_configured() -> bool:
     return bool(llama_exe()) and Path(llama_exe()).exists() and bool(llama_model_path()) and Path(llama_model_path()).exists()
 
 
+def llama_server_install_hint() -> str:
+    if sys.platform == "win32":
+        return "winget install -e --id ggml.llamacpp   (or download from https://github.com/ggml-org/llama.cpp/releases)"
+    if sys.platform == "darwin":
+        return "brew install llama.cpp"
+    return "see https://github.com/ggml-org/llama.cpp#building-the-project"
+
+
+async def ensure_llama_server_binary(timeout_s: float = 180) -> str:
+    """Return a usable llama-server path, installing it via the platform's
+    package manager first if it isn't anywhere to be found.
+
+    No bundled binary, no manual hunt for a release zip: anyone who already
+    has winget (every Windows 10/11 box) or brew gets this for free, the same
+    way `spectrida onboard` already leans on winget for Ollama.
+    """
+    found = llama_exe()
+    if found and Path(found).exists():
+        return found
+
+    if sys.platform == "win32" and shutil.which("winget"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "winget", "install", "-e", "--id", "ggml.llamacpp",
+                "--accept-package-agreements", "--accept-source-agreements",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+        except Exception:
+            pass
+    elif sys.platform == "darwin" and shutil.which("brew"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "brew", "install", "llama.cpp",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=timeout_s)
+        except Exception:
+            pass
+
+    # winget (at least for portable/zip packages) can return control to the
+    # CLI slightly before the actual file extraction finishes -- give it a
+    # few seconds of grace before concluding the install didn't take.
+    for _ in range(8):
+        found = llama_exe()
+        if found and Path(found).exists():
+            return found
+        await asyncio.sleep(2)
+    return llama_exe()
+
+
 async def ensure_llama_server(timeout_s: float = 120) -> bool:
-    """True if llama-server is reachable; tries to launch it (GPU model load
-    can take 30-60s+, hence the generous default timeout) if not."""
+    """True if llama-server is reachable; installs the binary if it's
+    missing entirely, then tries to launch it (GPU model load can take
+    30-60s+, hence the generous default timeout)."""
     if await llama_server_running():
         return True
-    if not llama_server_configured():
+    exe_path = await ensure_llama_server_binary()
+    if not exe_path or not llama_model_path():
         return False
-    exe = Path(llama_exe())
+    exe = Path(exe_path)
     try:
         subprocess.Popen(
             [str(exe), "-m", llama_model_path(), *llama_extra_args()],

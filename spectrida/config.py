@@ -10,6 +10,7 @@ import functools
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 try:
@@ -120,6 +121,29 @@ def naming_health_url() -> str:
     return get("naming", "health_url", "SPECTRIDA_LLAMA_HEALTH_URL") or "http://127.0.0.1:8090/health"
 
 
+def _winget_portable_search(package_id_prefix: str, exe_name: str) -> str:
+    """Find an exe winget installed as a "portable" package.
+
+    winget adds portable installs to PATH via the registry, which an
+    already-running process never sees without a restart -- so right after
+    triggering an install ourselves, PATH lookups in *this* process miss it
+    even though it's right there. Check winget's own install locations
+    directly instead of relying on PATH alone.
+    """
+    if sys.platform != "win32":
+        return ""
+    base = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet"
+    link = base / "Links" / exe_name
+    if link.exists():
+        return str(link)
+    packages_dir = base / "Packages"
+    if packages_dir.exists():
+        for pkg_dir in packages_dir.glob(f"{package_id_prefix}*"):
+            for hit in pkg_dir.rglob(exe_name):
+                return str(hit)
+    return ""
+
+
 def llama_exe() -> str:
     configured = get("services", "llama_exe", "SPECTRIDA_LLAMA_EXE")
     if configured and Path(configured).exists():
@@ -128,6 +152,9 @@ def llama_exe() -> str:
     # a package manager, whatever), use that instead of requiring an exact
     # config.toml path no one's going to remember to set.
     found = shutil.which("llama-server") or shutil.which("llama-server.exe")
+    if found:
+        return found
+    found = _winget_portable_search("ggml.llamacpp", "llama-server.exe")
     return found or configured
 
 

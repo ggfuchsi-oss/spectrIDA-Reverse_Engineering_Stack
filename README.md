@@ -341,6 +341,8 @@ or just point it at a local instance):**
   genuinely stripped leftovers → push it all into the graph — as one background job you poll,
   so a multi-minute run never blocks the conversation.
 - `doctor` / `start_all` — check or boot llama-server + Neo4j without leaving the chat.
+  If llama-server itself isn't installed anywhere, `start_all` grabs it via winget (Windows) or
+  brew (macOS) first — no separate llama.cpp download/setup needed.
 
 It's not magic — a function that's still `sub_140001234` because nobody's looked at it yet is
 still `sub_140001234`. But the graph remembers everything the model *has* figured out, forever,

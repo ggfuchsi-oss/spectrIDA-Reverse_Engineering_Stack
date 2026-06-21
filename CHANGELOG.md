@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.3 — the ghost installs its own help
+
+0.2.2 fixed the model-file half of "MCP naming needs manual setup." This closes the other half:
+llama-server itself.
+
+- `start_all()` now installs llama-server automatically if it's missing entirely -- `winget
+  install -e --id ggml.llamacpp` on Windows, `brew install llama.cpp` on macOS -- the same way
+  onboarding already leans on winget for Ollama. No separate llama.cpp download, no hunting
+  through GitHub release assets for the right build.
+- `llama_exe()` also checks winget's own portable-package install location directly, not just
+  `PATH` -- a process that just triggered the install wouldn't see a PATH update without
+  restarting, since Windows only broadcasts that to processes that start *after* the change.
+- Verified end-to-end on a clean (no manually-configured `llama_exe`) run: auto-install, launch,
+  health check, and a real naming call all completed successfully against the winget-installed
+  binary.
+
 ## 0.2.2 — the ghost stops naming things "sub_*"
 
 Found by actually testing the AI naming path end-to-end (not just demangling) for the first time
