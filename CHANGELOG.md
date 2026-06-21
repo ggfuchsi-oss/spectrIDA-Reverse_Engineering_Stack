@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2.1 — the ghost actually reads Switch binaries now
+
+0.2.0's NSO support ran without errors and *looked* like it worked, but a real benchmark exposed
+three real bugs that meant it was barely finding anything:
+
+- **Wrong architecture**: IDA has no native NSO loader, so a raw-opened NSO silently fell back to
+  `metapc` (x86) — every NSO shard was scanning real AArch64 instructions with an x86 prologue
+  matcher and disassembler. Fixed by detecting Switch == AArch64 explicitly instead of trusting
+  IDA's auto-detected processor type for a format it doesn't actually support.
+- **Missing LZ4 decompression**: NSO `.text`/`.rodata`/`.data` can be LZ4-compressed in the file;
+  the pipeline was opening the raw bytes directly with no decompression and no correct base
+  address, so even with the right architecture it was sometimes scanning compressed garbage.
+  Added a minimal NSO loader (decompress + `idaapi.mem2base` + `idaapi.add_segm`, ported from the
+  load-time logic in reswitched/loaders' `nxo64.py`) used by both the shard workers and the merge
+  step.
+- **Locally-scoped entry points**: each shard was deriving its own seed functions from a scan of
+  *only its own narrow byte window*, so any call whose target lived in a different shard never got
+  seeded — most calls, in a binary this size. Fixed with one global prologue+call-target scan over
+  the whole (decompressed) `.text` up front; each shard now just filters that list to its own
+  address range instead of rediscovering entry points blind.
+- Skipped FLIRT signature matching during the merge phase (unneeded here, and the single most
+  expensive default analysis pass) — worth a modest ~3%. Tried trimming further at first, but the
+  flags that actually moved the needle turned out to be the local-variable/stack-frame analysis
+  Hex-Rays depends on to decompile anything; disabling those silently zeroed out pseudocode for
+  plenty of functions, so that part was reverted.
+
+Net effect on a 74,790-function Switch binary (Mario Odyssey's `main.nso`), 16 workers: end-to-end
+parallel-analysis wall time went from a broken 727-function run to a real 197.6s / 74,790 functions,
+with decompilation verified working on every function in both this and the existing PE/x86 path.
+
 ## 0.2.0 — the ghost learns to talk back (chapter 2)
 
 - **MCP server** (`spectrida mcp`) — Claude (or any MCP client) can search/read/chain through

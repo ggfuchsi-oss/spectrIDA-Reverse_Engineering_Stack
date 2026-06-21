@@ -174,11 +174,18 @@ def discover_text_range(binary: str) -> tuple[int, int]:
 
 # -- Step 2: Per-shard worker ---------------------------------------------------
 
-def run_shard(binary: str, shard_start: int, shard_end: int, result_path: str) -> dict:
+def run_shard(binary: str, shard_start: int, shard_end: int, result_path: str,
+             arch_hint: str | None = None, entries_path: str | None = None) -> dict:
     """Spawn a subprocess running shard_worker.py."""
     t0 = time.time()
+    cmd = [PYTHON, WORKER, binary, hex(shard_start), hex(shard_end), result_path]
+    if entries_path:
+        cmd.append(arch_hint or "")
+        cmd.append(entries_path)
+    elif arch_hint:
+        cmd.append(arch_hint)
     proc = subprocess.run(
-        [PYTHON, WORKER, binary, hex(shard_start), hex(shard_end), result_path],
+        cmd,
         capture_output=True, text=True,
         cwd=IDA_DIR,
     )
@@ -205,9 +212,10 @@ def run_shard(binary: str, shard_start: int, shard_end: int, result_path: str) -
 # Open binary fresh, apply all function definitions + names from shard JSONs,
 # then run a final auto_wait() to stitch xrefs across shard boundaries.
 
-MERGE_LOADER = """# -*- coding: utf-8 -*-
+MERGE_LOADER = ("""# -*- coding: utf-8 -*-
 import sys, json
 sys.path.insert(0, __import__("os").environ.get("SPECTRIDA_IDALIB") or r"C:\\Program Files\\IDA Professional 9.1")
+sys.path.insert(0, r\"""" + str(Path(__file__).parent) + """\")
 import idapro
 idapro.enable_console_messages(False)
 binary      = sys.argv[1]
@@ -216,6 +224,25 @@ shard_jsons = sys.argv[2:]   # list of shard result JSON paths
 idapro.open_database(binary, run_auto_analysis=False)
 
 import idc, ida_funcs, idaapi
+
+# Same gap as shard_worker.py: open_database() on a raw NSO just dumps
+# compressed bytes into whatever segment IDA's generic loader created, not
+# the decompressed image at the real address range these function EAs refer
+# to. Without this, add_func() below targets addresses with no segment at
+# all and the merge silently does nothing useful (or hangs).
+if open(binary, "rb").read(4) == b"NSO0":
+    from nso_loader import load_into_ida
+    load_into_ida(binary)
+
+# FLIRT signature matching (scanning every function against IDA's signature
+# library) is the single most expensive default analysis pass and has
+# nothing to do with the stack-frame/lvar analysis Hex-Rays actually needs
+# to decompile a function -- safe to drop. Don't touch AF_LVAR/AF_STKARG/
+# AF_REGARG/etc: those ARE required for decompile() to produce real output,
+# clearing them silently breaks pseudocode for any function with locals.
+import ida_ida
+ida_ida.inf_set_af(ida_ida.inf_get_af() & ~(
+    ida_ida.AF_FLIRT | ida_ida.AF_HFLIRT | ida_ida.AF_SIGCMT | ida_ida.AF_SIGMLT))
 
 applied = 0
 for path in shard_jsons:
@@ -287,7 +314,7 @@ if not saved:
     print("[merge] ERROR: all save methods failed", flush=True)
 else:
     idapro.close_database()
-"""
+""")
 
 
 def merge_shards(binary: str, shard_result_paths: list[str], out_path: str | None = None) -> str:
@@ -440,20 +467,42 @@ def main():
 
     is_nso = Path(binary).read_bytes()[:4] == b"NSO0"
 
-    # Step 2: GPU prologue scan -> density-balanced shards
-    # NSO sections can be LZ4-compressed in the file, so the raw-file-offset
-    # GPU density prescan below -- which reads file bytes directly assuming
-    # an uncompressed, directly-mapped PE layout -- doesn't apply. We still
-    # get real parallelism though: each worker gets its own full (unzeroed,
-    # unmodified) copy and shard_worker.py restricts ITS scan to its slice of
-    # [text_start, text_end) via ida_bytes, post-load/post-decompression
-    # through idalib -- that part is already format-agnostic. Equal-width
-    # split instead of density-balanced (no raw-byte prescan available).
+    # Step 2: NSO entry-point pre-scan -> equal-width shards, OR
+    #         PE density scan -> density-balanced shards.
+    # NSO has no PE section table to drive a density prescan, so shards are
+    # just equal-width. To compensate, run ONE global prologue+BL scan over
+    # the whole (LZ4-decompressed) .text up front: a per-shard scan only ever
+    # sees call targets whose *calling* instruction happens to live in that
+    # same narrow shard, missing every cross-shard call -- which is most of
+    # them in a binary this size. Each shard worker still has to decompress +
+    # mem2base the binary itself (it's a separate idalib process), but it no
+    # longer has to rediscover entry points from a blind, narrow window --
+    # it just filters this master list down to its own [start, end) slice.
+    entries_path = None
     if is_nso:
         step = max(1, (text_end - text_start) // n)
         shards = [(s, min(s + step, text_end)) for s in range(text_start, text_end, step)]
-        print(f"[parallel_analyze] NSO detected -- {len(shards)} equal-width shards "
-              f"(no density prescan; idalib's own loader handles decompression per worker)", flush=True)
+        print(f"[parallel_analyze] NSO detected -- {len(shards)} equal-width shards", flush=True)
+
+        print("[parallel_analyze] global entry-point pre-scan...", flush=True)
+        sys.path.insert(0, str(Path(__file__).parent))
+        from ida_gpu_accel.arm64_scanner import _cpu_scan, _gpu_scan
+        from ida_gpu_accel.config import GPU_ENABLED
+        from nso_loader import parse_nso
+        info = parse_nso(binary)
+        full_text = info["text"]
+        try:
+            if not GPU_ENABLED:
+                raise RuntimeError("GPU disabled")
+            prologues, bl_targets, _, _ = _gpu_scan(full_text, text_start)
+        except Exception as _e:
+            print(f"[parallel_analyze] GPU pre-scan failed ({_e}), using CPU", flush=True)
+            prologues, bl_targets, _, _ = _cpu_scan(full_text, text_start)
+        all_entries = sorted(set(prologues) | set(bl_targets))
+        print(f"[parallel_analyze] global pre-scan: {len(all_entries)} candidate entry points "
+              f"across {(text_end - text_start) // 1024 // 1024}MB", flush=True)
+        entries_path = str(tempfile.mktemp(suffix="_entries.json"))
+        Path(entries_path).write_text(json.dumps(all_entries))
     else:
         print("[parallel_analyze] scanning function density for balanced shards...", flush=True)
         shards = _density_shards(binary, text_start, text_end, n)
@@ -505,11 +554,17 @@ def main():
 
     print(f"[parallel_analyze] launching {total_shards} workers...", flush=True)
 
+    # Switch/NSO is always AArch64 -- IDA's headless binary loader has no native
+    # NSO support and silently falls back to metapc (x86), so detecting arch
+    # from idaapi.get_inf_structure().procname inside the worker is unreliable.
+    # We already know the format here, so hand the arch down explicitly instead.
+    arch_hint = "arm64" if is_nso else None
+
     with ThreadPoolExecutor(max_workers=n) as pool:
         for i, (s_start, s_end) in enumerate(shards):
             rpath = str(tmpdir / f"shard_{i:02d}.json")
             result_paths.append(rpath)
-            fut = pool.submit(run_shard, worker_binaries[i], s_start, s_end, rpath)
+            fut = pool.submit(run_shard, worker_binaries[i], s_start, s_end, rpath, arch_hint, entries_path)
             fut._shard_id = i
             futures.append(fut)
 

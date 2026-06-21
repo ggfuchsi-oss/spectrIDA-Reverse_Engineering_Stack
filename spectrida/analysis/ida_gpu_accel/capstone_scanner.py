@@ -284,12 +284,22 @@ def _scan_shard_arm64(data: bytes, base_ea: int,
 
 def scan_shard(data: bytes, base_ea: int,
                shard_start: int, shard_end: int,
-               arch: str = "x86_64") -> ShardResult:
+               arch: str = "x86_64",
+               entry_points: list[int] | None = None) -> ShardResult:
     """
-    Full Capstone disasm pass on a shard. Gets entry points from GPU/CPU scanner first.
+    Full Capstone disasm pass on a shard. Gets entry points from GPU/CPU scanner
+    first, unless the caller already has a precomputed list (entry_points) --
+    e.g. from a global whole-binary scan, which finds call targets a narrow
+    per-shard scan would miss simply because the calling instruction lives in
+    a different shard than its target.
 
     arch: "x86_64" or "arm64"
     """
+    if entry_points is not None:
+        if arch == "x86_64":
+            return _scan_shard_x86(data, base_ea, shard_start, shard_end, entry_points)
+        return _scan_shard_arm64(data, base_ea, shard_start, shard_end, entry_points)
+
     # Step 1: GPU/CPU fast scan to seed entry points
     if arch == "x86_64":
         if GPU_ENABLED:
@@ -305,18 +315,23 @@ def scan_shard(data: bytes, base_ea: int,
             entry_points = _x86_prologues_numpy(data, base_ea)
         return _scan_shard_x86(data, base_ea, shard_start, shard_end, entry_points)
     else:
+        # Prologues alone miss most functions -- not every ARM64 compiler emits
+        # the exact `stp x29,x30,[sp,#-N]!` pattern (leaf functions skip it
+        # entirely, others use a non-pre-indexed stp after a separate `sub sp`).
+        # BL targets are a far more reliable entry-point signal: every called
+        # function shows up there regardless of its prologue shape.
         if GPU_ENABLED:
             try:
                 from .arm64_scanner import _gpu_scan
-                prologues, _, _, _ = _gpu_scan(data, base_ea)
-                entry_points = prologues
+                prologues, bl_targets, _, _ = _gpu_scan(data, base_ea)
+                entry_points = sorted(set(prologues) | set(bl_targets))
             except Exception as e:
                 print(f"[capstone] GPU seed failed ({e}), using CPU seed", flush=True)
                 from .arm64_scanner import _cpu_scan
-                prologues, _, _, _ = _cpu_scan(data, base_ea)
-                entry_points = prologues
+                prologues, bl_targets, _, _ = _cpu_scan(data, base_ea)
+                entry_points = sorted(set(prologues) | set(bl_targets))
         else:
             from .arm64_scanner import _cpu_scan
-            prologues, _, _, _ = _cpu_scan(data, base_ea)
-            entry_points = prologues
+            prologues, bl_targets, _, _ = _cpu_scan(data, base_ea)
+            entry_points = sorted(set(prologues) | set(bl_targets))
         return _scan_shard_arm64(data, base_ea, shard_start, shard_end, entry_points)

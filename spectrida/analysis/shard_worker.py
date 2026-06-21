@@ -26,10 +26,12 @@ ACCEL_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, IDA_DIR)
 sys.path.insert(0, ACCEL_DIR)
 
-binary      = sys.argv[1]
-shard_start = int(sys.argv[2], 16)
-shard_end   = int(sys.argv[3], 16)
-result_path = sys.argv[4]
+binary       = sys.argv[1]
+shard_start  = int(sys.argv[2], 16)
+shard_end    = int(sys.argv[3], 16)
+result_path  = sys.argv[4]
+arch_hint    = sys.argv[5] if len(sys.argv) > 5 else None
+entries_path = sys.argv[6] if len(sys.argv) > 6 else None
 
 def log(msg: str):
     print(f"[shard {shard_start:#x}] {msg}", flush=True)
@@ -48,13 +50,29 @@ import idaapi
 import idautils
 import idc
 
+# IDA has no native NSO loader -- open_database() above just dumps the raw
+# (possibly still LZ4-compressed) file bytes into whatever segment its
+# generic Binary File fallback creates, at the wrong base, on the wrong
+# processor. Decompress + remap it properly before any scanning happens.
+is_nso = Path(binary).read_bytes()[:4] == b"NSO0"
+if is_nso:
+    from nso_loader import load_into_ida
+    load_into_ida(binary)
+
 # ── Detect arch ───────────────────────────────────────────────────────────────
-try:
-    info = idaapi.get_inf_structure()
-    proc = info.procname.lower() if hasattr(info, "procname") else ""
-    arch = "arm64" if ("arm" in proc or "aarch" in proc) else "x86_64"
-except Exception:
-    arch = "x86_64"
+# A caller that already knows the binary format (e.g. NSO == always AArch64 on
+# Switch) can hand it down directly -- IDA's headless binary loader has no
+# native NSO support and silently defaults to metapc, so procname can't be
+# trusted to tell us this on its own.
+if arch_hint:
+    arch = arch_hint
+else:
+    try:
+        info = idaapi.get_inf_structure()
+        proc = info.procname.lower() if hasattr(info, "procname") else ""
+        arch = "arm64" if ("arm" in proc or "aarch" in proc) else "x86_64"
+    except Exception:
+        arch = "x86_64"
 
 log(f"arch={arch}")
 
@@ -68,28 +86,44 @@ for seg_ea in list(idautils.Segments()):
 
 t_start = time.time()
 
-# ── GPU fast-scan → entry points ──────────────────────────────────────────────
+raw = ida_bytes.get_bytes(shard_start, shard_end - shard_start)
+
+# ── Entry points ───────────────────────────────────────────────────────────────
+# A precomputed global entry-points file (entries_path) takes priority -- a
+# per-shard scan only ever sees BL targets whose CALLING instruction happens
+# to live in this same narrow shard, missing every cross-shard call. A single
+# whole-binary scan done once up front doesn't have that blind spot.
 entry_points = []
-try:
-    if arch == "x86_64":
-        from ida_gpu_accel.config import GPU_ENABLED
-        from ida_gpu_accel.x86_64_scanner import _gpu_scan_x86, _x86_prologues_numpy
-        raw = ida_bytes.get_bytes(shard_start, shard_end - shard_start)
-        if raw:
-            if GPU_ENABLED:
-                entry_points = _gpu_scan_x86(raw, shard_start)
-            else:
-                entry_points = _x86_prologues_numpy(raw, shard_start)
-            log(f"GPU scan: {len(entry_points)} entry points")
-    else:
-        from ida_gpu_accel.arm64_scanner import scan
-        raw = ida_bytes.get_bytes(shard_start, shard_end - shard_start)
-        if raw:
-            prologues, _, _, _ = scan(raw, shard_start)
-            entry_points = prologues
-            log(f"GPU scan: {len(entry_points)} entry points")
-except Exception as _e:
-    log(f"GPU scan error (non-fatal): {_e}")
+if entries_path:
+    try:
+        all_entries = json.loads(Path(entries_path).read_text())
+        entry_points = [ea for ea in all_entries if shard_start <= ea < shard_end]
+        log(f"global entry points: {len(entry_points)} in range")
+    except Exception as _e:
+        log(f"failed to load global entries ({_e}), falling back to local scan")
+        entries_path = None
+
+if not entries_path:
+    try:
+        if arch == "x86_64":
+            from ida_gpu_accel.config import GPU_ENABLED
+            from ida_gpu_accel.x86_64_scanner import _gpu_scan_x86, _x86_prologues_numpy
+            if raw:
+                if GPU_ENABLED:
+                    entry_points = _gpu_scan_x86(raw, shard_start)
+                else:
+                    entry_points = _x86_prologues_numpy(raw, shard_start)
+                log(f"GPU scan: {len(entry_points)} entry points")
+        else:
+            from ida_gpu_accel.arm64_scanner import scan
+            if raw:
+                # Prologue pattern alone misses leaf functions / non-standard
+                # frame setups -- BL targets (real call destinations) catch those.
+                prologues, bl_targets, _, _ = scan(raw, shard_start)
+                entry_points = sorted(set(prologues) | set(bl_targets))
+                log(f"GPU scan: {len(entry_points)} entry points")
+    except Exception as _e:
+        log(f"GPU scan error (non-fatal): {_e}")
 
 # ── Capstone recursive descent ────────────────────────────────────────────────
 # We write JSON directly from Capstone results — no add_func() in workers.
@@ -105,7 +139,8 @@ try:
         raise RuntimeError("no raw bytes")
 
     log(f"Capstone pass starting ({len(entry_points)} seeds)...")
-    result = scan_shard(raw, shard_start, shard_start, shard_end, arch=arch)
+    result = scan_shard(raw, shard_start, shard_start, shard_end, arch=arch,
+                       entry_points=entry_points if entries_path else None)
 
     for fi in result.funcs:
         if shard_start <= fi.ea < shard_end:

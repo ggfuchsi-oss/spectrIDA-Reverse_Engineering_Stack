@@ -4,7 +4,9 @@
 
 **Ghost through binaries.**
 
-Parallel IDA Pro analysis + AI function naming + a terminal that doesn't suck.
+A local, AI-powered reverse engineering assistant: parallel IDA Pro analysis, AI function
+naming, a terminal that doesn't suck, a Neo4j knowledge graph of everything it's ever figured
+out, and an MCP server so Claude can search and chain through that graph directly.
 
 </div>
 
@@ -31,6 +33,23 @@ the binary into N shards, runs them in parallel via idalib, merges into one `.i6
 fine-tuned 8B model **name every function** — all from one terminal UI with a cyberpunk theme and
 exactly the right amount of sarcasm.
 
+That's Chapter 1, and it stands on its own: pure speed, no AI required if you don't want it.
+
+Chapter 2 turns the output into something that outlives the session: every name, every piece of
+pseudocode, every disassembled instruction, every call edge — written into a Neo4j graph an agent
+can actually live in. Point Claude (or [pi](https://pi.dev), or anything else that speaks MCP) at
+it and it can `search_functions`, walk `get_callers`/`get_callees`, follow a call chain N hops
+deep, read exact instruction boundaries for planning a patch, and even kick off analysis on a
+brand-new binary itself — instead of you pasting decompiler output into a chat window one
+function at a time.
+
+```
+Binary  ─▶  Parallel IDA Analysis  ─▶  Demangle  ─▶  AI Naming  ─▶  Neo4j Graph  ─▶  MCP Server  ─▶  Claude
+              (N idalib shards)       (free, real)   (stripped     (persists,        (search/chain/
+                                                       leftovers     forever,          rename, live)
+                                                       only)         across sessions)
+```
+
 It is not Ghidra. It does one annoying thing (slow analysis + naming) fast, and it's genuinely fun
 to use. **199 downloads speak for themselves.**
 
@@ -46,6 +65,44 @@ to use. **199 downloads speak for themselves.**
 | Among Us DLL — spectrIDA (16 workers) | **67 seconds** |
 | 153,649 function binary — full naming pass | overnight |
 | Binary overview (what does this thing do?) | ~30 seconds |
+
+**Hardware these were measured on:** AMD Ryzen 7 5800X3D (8C/16T), 32 GB RAM, RTX 4070 12 GB.
+Different hardware moves the parallel-analysis numbers (more cores, more shards, faster); the
+naming numbers are mostly GPU-bound. The 4-hour/67-second Among Us figures predate Chapter 2 and
+aren't independently re-verified in every release — re-run `spectrida analyze` yourself if you
+want a number for your own machine and binary, results vary with shard density and binary size.
+
+Numbers actually re-verified during Chapter 2 development, same hardware:
+
+| binary | functions | task | time / result |
+|--------|-----------|------|----------------|
+| test_small.dll (PE) | 189 | parallel analysis, 4 workers, CLI | **6.4s** |
+| test_small.dll (PE) | 164 | full MCP pipeline (analyze + demangle + graph write) | **9.8s** |
+| main.nso — Mario Odyssey (NSO), 16 workers | 28,038 seed functions | parallel sharded scan phase | **54.5s** |
+| main.nso — Mario Odyssey (NSO), 16 workers | 74,790 total functions | + merge/full-analysis phase | **143.1s** |
+| main.nso — Mario Odyssey (NSO), 16 workers | 74,790 total functions | **end-to-end wall time** | **197.6s** |
+| main.nso — Mario Odyssey (NSO) | 74,790 | resolved via demangling alone (Itanium ABI, free, no AI) | 67,300 (90.0%) |
+
+That NSO row is the real equivalent of the old Among Us "4 hours → 67 seconds" claim, measured
+fresh this release on a 74,790-function Switch binary, no AI naming involved (demangling only —
+`populate=False`). The parallel phase (16 cores, ~55s) does the initial sharded discovery; the
+merge phase (~143s) is single-threaded by design — one IDA database, one writer — and is also
+where most of the *function count* comes from: once the binary is correctly decompressed and
+flagged AArch64, IDA's own analyzer expands the parallel pass's 28k seed functions to the full
+74,790 in one consolidated pass. Getting an honest number here surfaced (and fixed) three real
+bugs in the NSO pipeline: wrong-architecture detection (it was silently scanning AArch64 as x86),
+locally-scoped entry-point seeding that missed any call crossing a shard boundary, and a missing
+LZ4-decompression step that meant earlier NSO runs were partly scanning compressed garbage. (We
+also tried trimming the merge phase's analysis flags for speed; turned out the flags that mattered
+for timing — local-variable/stack-frame analysis — are exactly what Hex-Rays needs to decompile
+anything, so disabling them silently zeroed out pseudocode for plenty of functions. Reverted to
+only skipping FLIRT signature matching, which is genuinely unneeded here and safe to drop — worth
+~3%, not the dramatic win it first looked like.)
+
+**On naming accuracy:** it's not Ghidra-grade ground truth, it's an 8B model guessing from
+pseudocode. Generic helpers/getters tend to land well; deeply game-specific logic is more of a
+coin flip. Rename anything it gets wrong — that's why `rename_function` persists straight back
+into the graph.
 
 ---
 
