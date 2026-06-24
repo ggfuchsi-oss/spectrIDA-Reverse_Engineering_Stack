@@ -21,6 +21,14 @@ import sys
 import time
 from pathlib import Path
 
+# Arch values a FormatHandler can report for which neither ida_gpu_accel
+# scanner module nor capstone_scanner.scan_shard() has any real support --
+# "arm32" (32-bit ARM/Thumb) being the current example (capstone_scanner.py
+# only builds CS_ARCH_X86 and CS_ARCH_ARM64 Capstone instances). Used below
+# to skip those scan paths cleanly instead of silently misrouting 32-bit ARM
+# bytes through the x86_64 or AArch64 decoder.
+_UNSUPPORTED_SCAN_ARCHES = {"arm32"}
+
 IDA_DIR   = os.environ.get("SPECTRIDA_IDALIB") or r"C:\Program Files\IDA Professional 9.1"
 ACCEL_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, IDA_DIR)
@@ -77,7 +85,16 @@ else:
     try:
         info = idaapi.get_inf_structure()
         proc = info.procname.lower() if hasattr(info, "procname") else ""
-        arch = "arm64" if ("arm" in proc or "aarch" in proc) else "x86_64"
+        # "arm" alone matches both 32-bit ARM and AArch64 procnames -- check
+        # the 64-bit markers first so 32-bit ARM doesn't get misclassified
+        # as arm64 (there's no scanner support for either right now if it's
+        # genuinely 32-bit, but at least it's labeled correctly).
+        if "aarch64" in proc or "arm64" in proc:
+            arch = "arm64"
+        elif "arm" in proc:
+            arch = "arm32"
+        else:
+            arch = "x86_64"
     except Exception:
         arch = "x86_64"
 
@@ -110,7 +127,9 @@ if entries_path:
         log(f"failed to load global entries ({_e}), falling back to local scan")
         entries_path = None
 
-if not entries_path:
+if not entries_path and arch in _UNSUPPORTED_SCAN_ARCHES:
+    log(f"no GPU scanner for arch={arch!r}, skipping (will rely on whatever IDA's own analysis finds)")
+elif not entries_path:
     try:
         if arch == "x86_64":
             from ida_gpu_accel.config import GPU_ENABLED
@@ -139,6 +158,9 @@ if not entries_path:
 capstone_funcs: list[dict] = []
 
 try:
+    if arch in _UNSUPPORTED_SCAN_ARCHES:
+        raise RuntimeError(f"no capstone scanner for arch={arch!r}")
+
     from ida_gpu_accel.capstone_scanner import HAS_CAPSTONE, scan_shard
     if not HAS_CAPSTONE:
         raise ImportError("capstone not installed")

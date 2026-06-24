@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.5 — 32-bit ARM stops pretending to be AArch64
+
+Found analyzing a real armeabi-v7a `.so`: `ELFHandler`'s arch-hint table only mapped x86_64 and
+AArch64, so 32-bit ARM (`EM_ARM`) came back `arch=None`. That fell through to IDA's own procname
+detection, where the `"arm" in proc` substring check matches *both* ARM and AArch64 procnames --
+so 32-bit ARM got silently misclassified as arm64. Worse, `_density_shards()` (no handler-level
+arch override there) independently defaulted the *same* binary to the x86_64 scanner. Two
+different wrong assumptions about the same bytes, fed into a Capstone AArch64/x86 decoder that
+has no idea it's actually looking at 32-bit ARM/Thumb -- that's what was crashing.
+
+- `formats/elf.py` now maps `EM_ARM` to a real, distinct `"arm32"` value -- never confused with
+  `"arm64"` again.
+- `parallel_analyze.py`/`shard_worker.py` both now check arch against an explicit
+  `_UNSUPPORTED_SCAN_ARCHES` set and skip the GPU/Capstone scan paths entirely for it, falling
+  back to equal-byte sharding + whatever IDA's own native analysis finds, rather than routing
+  unsupported bytes through the wrong decoder.
+- Tightened shard_worker's IDA-procname fallback to check the 64-bit markers (`aarch64`/`arm64`)
+  before the bare `"arm"` substring, so it doesn't misclassify 32-bit ARM there either.
+- No real 32-bit ARM/Thumb Capstone support added yet -- this stops the crash and labels it
+  correctly; it doesn't make 32-bit ARM binaries auto-analyze as well as x86/AArch64 ones do.
+
 ## 0.2.4 — formats become extensions
 
 Binary-format support was three special cases wired straight into the pipeline: PE section

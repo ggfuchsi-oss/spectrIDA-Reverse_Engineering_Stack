@@ -71,7 +71,7 @@ def _make_nso(tmp_path, *, compress_text: bool, text_plain: bytes | None = None)
     return p, text_plain, ro_plain, data_plain
 
 
-def _make_elf64_so(tmp_path):
+def _make_elf64_so(tmp_path, machine=62, name="libtest.so"):
     text_data = bytes(range(32))
     shoff = 64
     shentsize = 64
@@ -84,7 +84,7 @@ def _make_elf64_so(tmp_path):
     header[5] = 1   # ELFDATA2LSB
     header[6] = 1   # EV_CURRENT
     struct.pack_into("<H", header, 16, 3)             # e_type = ET_DYN (.so)
-    struct.pack_into("<H", header, 18, 62)            # e_machine = EM_X86_64
+    struct.pack_into("<H", header, 18, machine)       # e_machine
     struct.pack_into("<Q", header, 40, shoff)         # e_shoff
     struct.pack_into("<H", header, 58, shentsize)     # e_shentsize
     struct.pack_into("<H", header, 60, shnum)         # e_shnum
@@ -107,7 +107,7 @@ def _make_elf64_so(tmp_path):
     struct.pack_into("<Q", shdrs, o + 16, 0x2000)      # sh_addr
     struct.pack_into("<Q", shdrs, o + 32, 0x40)        # sh_size
 
-    p = tmp_path / "libtest.so"
+    p = tmp_path / name
     p.write_bytes(bytes(header) + bytes(shdrs) + text_data)
     return p, text_data
 
@@ -132,6 +132,24 @@ def test_registry_detects_elf(tmp_path):
     p, _ = _make_elf64_so(tmp_path)
     handler = formats.detect(str(p))
     assert handler.name == "ELF"
+
+
+def test_elf_arch_hint_distinguishes_arm32_from_arm64(tmp_path):
+    # Regression: 32-bit ARM (EM_ARM=40) was unmapped, so image.arch fell
+    # through to None -- which then got misclassified as "arm64" by IDA
+    # procname substring matching ("arm" matches both ARM and AArch64),
+    # silently routing real 32-bit ARM/Thumb bytes through the AArch64
+    # Capstone decoder. "arm32" must be its own distinct, never-confused-
+    # with-"arm64" value.
+    handler = ELFHandler()
+
+    p64, _ = _make_elf64_so(tmp_path, machine=183, name="lib64.so")   # EM_AARCH64
+    assert handler.prepare(str(p64), workdir=str(tmp_path)).arch == "arm64"
+
+    p32, _ = _make_elf64_so(tmp_path, machine=40, name="lib32.so")    # EM_ARM
+    arch32 = handler.prepare(str(p32), workdir=str(tmp_path)).arch
+    assert arch32 == "arm32"
+    assert arch32 != "arm64"
 
 
 def test_pe_sniff_and_prepare(tmp_path):

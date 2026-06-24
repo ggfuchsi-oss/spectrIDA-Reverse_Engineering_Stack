@@ -21,7 +21,15 @@ _EM_ARM = 40
 _EM_X86_64 = 62
 _EM_AARCH64 = 183
 
-_ARCH_HINTS = {_EM_X86_64: "x86_64", _EM_AARCH64: "arm64"}
+# "arm32" is a real, distinct value -- NOT a typo for "arm64". There is no
+# GPU/Capstone scanner support for 32-bit ARM/Thumb anywhere in this project
+# (capstone_scanner.py only builds CS_ARCH_X86 and CS_ARCH_ARM64 instances).
+# Reporting it explicitly lets the scan-dispatch code in parallel_analyze.py
+# and shard_worker.py skip those scanners cleanly instead of silently
+# misrouting 32-bit ARM bytes through the AArch64 decoder (which doesn't
+# crash loudly so much as just confidently produce garbage / blow up deep in
+# whatever assumption the AArch64 path makes about instruction alignment).
+_ARCH_HINTS = {_EM_X86_64: "x86_64", _EM_AARCH64: "arm64", _EM_ARM: "arm32"}
 
 
 class ELFHandler(FormatHandler):

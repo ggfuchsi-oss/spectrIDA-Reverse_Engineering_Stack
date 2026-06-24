@@ -23,6 +23,13 @@ from pathlib import Path
 from spectrida.analysis.formats import FormatHandler, PreparedImage
 from spectrida.analysis.formats import detect as detect_format
 
+# Arch values a FormatHandler can report (image.arch) for which neither
+# ida_gpu_accel scanner module nor capstone_scanner.scan_shard() has any real
+# support -- "arm32" (32-bit ARM/Thumb) being the current example. Used to
+# skip those scan paths cleanly instead of silently misrouting their bytes
+# through the x86_64 or AArch64 decoder.
+_UNSUPPORTED_SCAN_ARCHES = {"arm32"}
+
 IDA_DIR   = os.environ.get("SPECTRIDA_IDALIB") or r"C:\Program Files\IDA Professional 9.1"
 IDAT_EXE  = str(Path(IDA_DIR) / "idat.exe")
 PYTHON    = sys.executable
@@ -284,6 +291,13 @@ def _density_shards(handler: FormatHandler, image: PreparedImage, text_start: in
     Falls back to equal-byte split if scan fails.
     """
     try:
+        if image.arch in _UNSUPPORTED_SCAN_ARCHES:
+            # No GPU/Capstone scanner exists for this arch (32-bit ARM/Thumb
+            # is the current example) -- don't silently misroute its bytes
+            # through the x86 or AArch64 decoder, fall straight to the
+            # equal-byte split below instead.
+            raise RuntimeError(f"no density scanner for arch={image.arch!r}")
+
         data = handler.read_bytes(image, text_start, text_end)
         if not data:
             raise RuntimeError("could not read .text bytes")
