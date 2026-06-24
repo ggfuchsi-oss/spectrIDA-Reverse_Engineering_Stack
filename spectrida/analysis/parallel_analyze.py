@@ -13,13 +13,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import struct
 import subprocess
 import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+from spectrida.analysis.formats import FormatHandler, PreparedImage
+from spectrida.analysis.formats import detect as detect_format
 
 IDA_DIR   = os.environ.get("SPECTRIDA_IDALIB") or r"C:\Program Files\IDA Professional 9.1"
 IDAT_EXE  = str(Path(IDA_DIR) / "idat.exe")
@@ -31,26 +33,16 @@ sys.path.insert(0, IDA_DIR)
 
 
 # -- Step 1: Discovery pass -----------------------------------------------------
-# Open binary quickly to find code segment boundaries WITHOUT full analysis.
-# We only need to know the .text range to shard it.
+# Code segment boundaries normally come straight from the format handler's
+# PreparedImage.sections (no IDA needed) -- see handler.code_range(). This
+# subprocess-based PE header parse only exists as a fallback for the rare
+# case a handler can't tell us its code range (code_range() returns None).
 
 DISCOVER_SCRIPT = """
 import sys, json, struct
 
 with open(sys.argv[1], 'rb') as f:
     h = f.read(0x1000)
-
-if h[:4] == b'NSO0':
-    # Nintendo Switch NSO: fixed header, no section table. text_mem_off/size
-    # live at 0x14/0x18. IDA's NSO loader places it at a fixed synthetic base
-    # (0x7100000000) when opened standalone (no other modules loaded) -- the
-    # same base already observed in this project's analyzed NSOs.
-    NSO_BASE = 0x7100000000
-    text_mem_off, text_size = struct.unpack_from('<II', h, 0x14)
-    start = NSO_BASE + text_mem_off
-    end   = start + text_size
-    print(json.dumps({"start": start, "end": end, "size": text_size}))
-    sys.exit(0)
 
 pe_off       = struct.unpack_from('<I', h, 0x3C)[0]
 # COFF header
@@ -87,71 +79,9 @@ else:
 """
 
 
-def _pe_sections(binary: str):
-    """Return list of (name, va, raw_off, raw_size) for all PE sections."""
-    with open(binary, "rb") as f:
-        h = f.read(0x1000)
-    pe_off = struct.unpack_from("<I", h, 0x3C)[0]
-    num_sects   = struct.unpack_from("<H", h, pe_off + 6)[0]
-    opt_sz      = struct.unpack_from("<H", h, pe_off + 20)[0]
-    sect_off    = pe_off + 24 + opt_sz
-    sects = []
-    for i in range(num_sects):
-        o = sect_off + i * 40
-        name     = h[o:o+8].rstrip(b"\x00").decode("ascii", errors="replace")
-        vsize    = struct.unpack_from("<I", h, o+8)[0]
-        vaddr    = struct.unpack_from("<I", h, o+12)[0]
-        raw_size = struct.unpack_from("<I", h, o+16)[0]
-        raw_off  = struct.unpack_from("<I", h, o+20)[0]
-        sects.append((name, vaddr, raw_off, raw_size, vsize))
-    return sects
-
-
-def _image_base(binary: str) -> int:
-    with open(binary, "rb") as f:
-        h = f.read(0x1000)
-    pe_off  = struct.unpack_from("<I", h, 0x3C)[0]
-    machine = struct.unpack_from("<H", h, pe_off + 4)[0]
-    is64    = machine == 0x8664 or machine == 0xAA64
-    ibase_off = pe_off + 24 + (28 if not is64 else 24)
-    fmt = "<Q" if is64 else "<I"
-    return struct.unpack_from(fmt, h, ibase_off)[0]
-
-
-def make_shard_binary(src: str, dst: str, shard_start_va: int, shard_end_va: int) -> None:
-    """Copy src -> dst, zeroing raw bytes of PE sections that fall entirely outside the shard VA range."""
-    import shutil
-    shutil.copy2(src, dst)
-    base   = _image_base(src)
-    sects  = _pe_sections(src)
-    rel_s  = shard_start_va - base
-    rel_e  = shard_end_va   - base
-    with open(dst, "r+b") as f:
-        for name, vaddr, raw_off, raw_size, vsize in sects:
-            sect_end = vaddr + vsize
-            # Zero out sections that don't overlap with our shard at all
-            if sect_end <= rel_s or vaddr >= rel_e:
-                if raw_off and raw_size:
-                    f.seek(raw_off)
-                    f.write(b"\x00" * raw_size)
-            # Partial overlap: zero the part before the shard
-            elif vaddr < rel_s:
-                zero_bytes = min(rel_s - vaddr, raw_size)
-                if raw_off and zero_bytes > 0:
-                    f.seek(raw_off)
-                    f.write(b"\x00" * zero_bytes)
-            # Partial overlap: zero the part after the shard
-            if sect_end > rel_e and vaddr < rel_e:
-                start_in_sect = max(rel_e - vaddr, 0)
-                zero_off = raw_off + start_in_sect
-                zero_bytes = raw_size - start_in_sect
-                if zero_off < raw_off + raw_size and zero_bytes > 0:
-                    f.seek(zero_off)
-                    f.write(b"\x00" * zero_bytes)
-
-
 def discover_text_range(binary: str) -> tuple[int, int]:
-    """Return (start, end) of the primary code segment."""
+    """Fallback PE-header-only discovery, used only when a handler can't
+    supply a code range itself via handler.code_range(image)."""
     script_path = Path(tempfile.mktemp(suffix=".py"))
     script_path.write_text(DISCOVER_SCRIPT)
     result = subprocess.run(
@@ -218,21 +148,24 @@ sys.path.insert(0, __import__("os").environ.get("SPECTRIDA_IDALIB") or r"C:\\Pro
 sys.path.insert(0, r\"""" + str(Path(__file__).parent) + """\")
 import idapro
 idapro.enable_console_messages(False)
+import os as _os
 binary      = sys.argv[1]
 shard_jsons = sys.argv[2:]   # list of shard result JSON paths
 
-idapro.open_database(binary, run_auto_analysis=False)
+# Same gap as shard_worker.py: open_database() on a format idalib has no
+# native loader for (NSO) just dumps raw/compressed bytes into whatever
+# segment IDA's generic fallback loader created, not the real decompressed
+# image at the address range these function EAs refer to. Without
+# post_open() rebuilding the real layout, add_func() below would target
+# addresses with no segment at all and the merge would silently do nothing
+# useful (or hang).
+from spectrida.analysis.formats import detect as _detect_format
+_handler = _detect_format(binary)
+_image   = _handler.prepare(binary, workdir=_os.path.dirname(binary))
+idapro.open_database(_image.binary_path, run_auto_analysis=False)
+_handler.post_open()
 
 import idc, ida_funcs, idaapi
-
-# Same gap as shard_worker.py: open_database() on a raw NSO just dumps
-# compressed bytes into whatever segment IDA's generic loader created, not
-# the decompressed image at the real address range these function EAs refer
-# to. Without this, add_func() below targets addresses with no segment at
-# all and the merge silently does nothing useful (or hangs).
-if open(binary, "rb").read(4) == b"NSO0":
-    from nso_loader import load_into_ida
-    load_into_ida(binary)
 
 # FLIRT signature matching (scanning every function against IDA's signature
 # library) is the single most expensive default analysis pass and has
@@ -342,7 +275,7 @@ def merge_shards(binary: str, shard_result_paths: list[str], out_path: str | Non
 
 # -- Density-balanced shard partitioning ---------------------------------------
 
-def _density_shards(binary: str, text_start: int, text_end: int,
+def _density_shards(handler: FormatHandler, image: PreparedImage, text_start: int, text_end: int,
                     n: int) -> list[tuple[int, int]]:
     """
     Scan the full .text for prologue patterns (GPU if available, else CPU),
@@ -351,50 +284,30 @@ def _density_shards(binary: str, text_start: int, text_end: int,
     Falls back to equal-byte split if scan fails.
     """
     try:
-        with open(binary, "rb") as f:
-            f.seek(0, 2)
-            file_size = f.tell()
-
-        # Read raw .text bytes directly from file using PE section table
-        base   = _image_base(binary)
-        sects  = _pe_sections(binary)
-        rel_s  = text_start - base
-        rel_e  = text_end   - base
-
-        # Find the raw file offset for text_start
-        raw_bytes = bytearray()
-        for name, vaddr, raw_off, raw_size, vsize in sects:
-            sect_va_start = vaddr
-            sect_va_end   = vaddr + vsize
-            if sect_va_end <= rel_s or sect_va_start >= rel_e:
-                continue
-            # Overlap: read the relevant portion
-            overlap_start = max(sect_va_start, rel_s)
-            overlap_end   = min(sect_va_end,   rel_e)
-            file_off      = raw_off + (overlap_start - sect_va_start)
-            byte_count    = min(overlap_end - overlap_start, raw_size - (overlap_start - sect_va_start))
-            if byte_count <= 0:
-                continue
-            with open(binary, "rb") as f:
-                f.seek(file_off)
-                raw_bytes += f.read(byte_count)
-
-        if not raw_bytes:
+        data = handler.read_bytes(image, text_start, text_end)
+        if not data:
             raise RuntimeError("could not read .text bytes")
 
-        data = bytes(raw_bytes)
-
-        # GPU density scan -- reuse the same scanner used by workers
+        # GPU density scan -- reuse the same scanners shard_worker uses,
+        # picking x86 vs arm64 from the handler's arch hint. This is what
+        # lets NSO get real density-balanced sharding too (previously it
+        # could only do equal-width splits, having no PE section table) --
+        # handler.read_bytes() already gives us the decompressed .text
+        # regardless of format.
         sys.path.insert(0, str(Path(__file__).parent))
-        from ida_gpu_accel.config import GPU_ENABLED
-        from ida_gpu_accel.x86_64_scanner import _gpu_scan_x86, _x86_prologues_numpy
-        try:
-            if GPU_ENABLED:
-                hits = _gpu_scan_x86(data, text_start)
-            else:
-                raise RuntimeError("GPU disabled")
-        except Exception:
-            hits = _x86_prologues_numpy(data, text_start)
+        if image.arch == "arm64":
+            from ida_gpu_accel.arm64_scanner import scan as _arm64_scan
+            hits, _, _, _ = _arm64_scan(data, text_start)
+        else:
+            from ida_gpu_accel.config import GPU_ENABLED
+            from ida_gpu_accel.x86_64_scanner import _gpu_scan_x86, _x86_prologues_numpy
+            try:
+                if GPU_ENABLED:
+                    hits = _gpu_scan_x86(data, text_start)
+                else:
+                    raise RuntimeError("GPU disabled")
+            except Exception:
+                hits = _x86_prologues_numpy(data, text_start)
 
         if not hits:
             raise RuntimeError("no prologues found")
@@ -454,9 +367,22 @@ def main():
     print(f"[parallel_analyze] binary: {binary}")
     print(f"[parallel_analyze] workers: {n}")
 
-    # Step 1: Discover .text range
+    # Each worker gets its OWN copy of the binary in a separate temp dir so
+    # IDA's sidecar files (.id0/.id1/.nam/.til) don't collide. Created up
+    # front since the format handler may need scratch space in prepare().
+    import shutil
+    tmpdir = Path(tempfile.mkdtemp(prefix="parallel_ida_"))
+
+    handler = detect_format(binary)
+    print(f"[parallel_analyze] format: {handler.name}")
+    image = handler.prepare(binary, str(tmpdir))
+    binary_name = Path(image.binary_path).name
+
+    # Step 1: Discover .text range -- straight from the handler's section
+    # table when it has one, falling back to the IDA-assisted PE-only probe.
     print("[parallel_analyze] discovering code segment...")
-    text_start, text_end = discover_text_range(binary)
+    crange = handler.code_range(image)
+    text_start, text_end = crange if crange else discover_text_range(image.binary_path)
     text_size = text_end - text_start
     print(f"[parallel_analyze] .text: {text_start:#x} - {text_end:#x}  ({text_size // 1024 // 1024}MB)")
 
@@ -465,70 +391,43 @@ def main():
     for ext in (".id0", ".id1", ".nam", ".til", ".id2"):
         Path(str(binary_stem) + ext).unlink(missing_ok=True)
 
-    is_nso = Path(binary).read_bytes()[:4] == b"NSO0"
-
-    # Step 2: NSO entry-point pre-scan -> equal-width shards, OR
-    #         PE density scan -> density-balanced shards.
-    # NSO has no PE section table to drive a density prescan, so shards are
-    # just equal-width. To compensate, run ONE global prologue+BL scan over
-    # the whole (LZ4-decompressed) .text up front: a per-shard scan only ever
-    # sees call targets whose *calling* instruction happens to live in that
-    # same narrow shard, missing every cross-shard call -- which is most of
-    # them in a binary this size. Each shard worker still has to decompress +
-    # mem2base the binary itself (it's a separate idalib process), but it no
-    # longer has to rediscover entry points from a blind, narrow window --
-    # it just filters this master list down to its own [start, end) slice.
-    entries_path = None
-    if is_nso:
-        step = max(1, (text_end - text_start) // n)
-        shards = [(s, min(s + step, text_end)) for s in range(text_start, text_end, step)]
-        print(f"[parallel_analyze] NSO detected -- {len(shards)} equal-width shards", flush=True)
-
-        print("[parallel_analyze] global entry-point pre-scan...", flush=True)
-        sys.path.insert(0, str(Path(__file__).parent))
-        from ida_gpu_accel.arm64_scanner import _cpu_scan, _gpu_scan
-        from ida_gpu_accel.config import GPU_ENABLED
-        from nso_loader import parse_nso
-        info = parse_nso(binary)
-        full_text = info["text"]
-        try:
-            if not GPU_ENABLED:
-                raise RuntimeError("GPU disabled")
-            prologues, bl_targets, _, _ = _gpu_scan(full_text, text_start)
-        except Exception as _e:
-            print(f"[parallel_analyze] GPU pre-scan failed ({_e}), using CPU", flush=True)
-            prologues, bl_targets, _, _ = _cpu_scan(full_text, text_start)
-        all_entries = sorted(set(prologues) | set(bl_targets))
-        print(f"[parallel_analyze] global pre-scan: {len(all_entries)} candidate entry points "
-              f"across {(text_end - text_start) // 1024 // 1024}MB", flush=True)
-        entries_path = str(tempfile.mktemp(suffix="_entries.json"))
-        Path(entries_path).write_text(json.dumps(all_entries))
-    else:
-        print("[parallel_analyze] scanning function density for balanced shards...", flush=True)
-        shards = _density_shards(binary, text_start, text_end, n)
+    # Step 2: GPU prologue scan -> density-balanced shards. Works for any
+    # format via handler.read_bytes()/image.arch -- NSO included, which
+    # previously could only do equal-width splits (no PE section table).
+    print("[parallel_analyze] scanning function density for balanced shards...", flush=True)
+    shards = _density_shards(handler, image, text_start, text_end, n)
     sizes  = [e - s for s, e in shards]
     print(f"[parallel_analyze] {len(shards)} shards, "
           f"min {min(sizes)//1024}KB max {max(sizes)//1024}KB "
           f"(density-balanced)", flush=True)
 
+    # Step 2b: optional global entry-point pre-scan (see
+    # FormatHandler.global_entry_points -- NSO needs this, most formats
+    # don't). A per-shard scan only ever sees call targets whose *calling*
+    # instruction happens to live in that same narrow shard, missing every
+    # cross-shard call -- which is most of them in a binary this size. Each
+    # shard worker still has to decompress + mem2base the binary itself
+    # (it's a separate idalib process), but it no longer has to rediscover
+    # entry points from a blind, narrow window -- it just filters this
+    # master list down to its own [start, end) slice.
+    entries_path = None
+    print("[parallel_analyze] global entry-point pre-scan...", flush=True)
+    all_entries = handler.global_entry_points(image, text_start, text_end)
+    if all_entries is not None:
+        print(f"[parallel_analyze] global pre-scan: {len(all_entries)} candidate entry points "
+              f"across {(text_end - text_start) // 1024 // 1024}MB", flush=True)
+        entries_path = str(tempfile.mktemp(suffix="_entries.json"))
+        Path(entries_path).write_text(json.dumps(all_entries))
+
     # Step 3: Run shards in parallel
-    # Each worker gets its OWN copy of the binary in a separate temp dir so
-    # IDA's sidecar files (.id0/.id1/.nam/.til) don't collide.
-    import shutil
-    binary_name = Path(binary).name
-    tmpdir = Path(tempfile.mkdtemp(prefix="parallel_ida_"))
     result_paths: list[str] = []
     worker_binaries: list[str] = []
-    print(f"[parallel_analyze] writing {len(shards)} shard binaries"
-          f"{'' if is_nso else ' (zeroing out-of-shard sections)'}...")
+    print(f"[parallel_analyze] writing {len(shards)} shard binaries...")
     for i, (s_start, s_end) in enumerate(shards):
         wdir = tmpdir / f"worker_{i:02d}"
         wdir.mkdir()
         dst = wdir / binary_name
-        if is_nso:
-            shutil.copy2(binary, dst)   # no zeroing -- NSO has no PE section table to parse
-        else:
-            make_shard_binary(binary, str(dst), s_start, s_end)
+        handler.make_shard_binary(image, str(dst), s_start, s_end)
         worker_binaries.append(str(dst))
 
     futures = []
@@ -554,11 +453,11 @@ def main():
 
     print(f"[parallel_analyze] launching {total_shards} workers...", flush=True)
 
-    # Switch/NSO is always AArch64 -- IDA's headless binary loader has no native
-    # NSO support and silently falls back to metapc (x86), so detecting arch
-    # from idaapi.get_inf_structure().procname inside the worker is unreliable.
-    # We already know the format here, so hand the arch down explicitly instead.
-    arch_hint = "arm64" if is_nso else None
+    # IDA's headless binary loader has no native loader for some formats
+    # (NSO) and silently falls back to metapc (x86), so detecting arch from
+    # idaapi.get_inf_structure().procname inside the worker is unreliable for
+    # those. The handler already knows -- hand its arch hint down explicitly.
+    arch_hint = image.arch
 
     with ThreadPoolExecutor(max_workers=n) as pool:
         for i, (s_start, s_end) in enumerate(shards):

@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — formats become extensions
+
+Binary-format support was three special cases wired straight into the pipeline: PE section
+parsing in `parallel_analyze.py`, and an `if is_nso` branch threaded through
+`parallel_analyze.py`/`shard_worker.py`/the merge loader calling into `nso_loader.py`. Turned it
+into a real plugin system instead.
+
+- **`spectrida/analysis/formats/`** — a `FormatHandler` contract (`sniff`/`prepare`/`post_open`/
+  `make_shard_binary`/`code_range`/`read_bytes`/`global_entry_points`), auto-discovered by
+  scanning the package directory for any module exposing a `HANDLER` instance. Third-party
+  formats can register via the `spectrida.formats` entry-point group without touching this repo.
+- **PE** moved into `formats/pe.py` unchanged (still just header/section-table parsing).
+- **NSO** is now `formats/nso.py` — a thin adapter around the *existing* `nso_loader.py`
+  (untouched: its decompress + `mem2base`/`add_segm` logic was already correct, this just exposes
+  it through the handler contract). The global entry-point pre-scan + `entries_path` mechanism
+  (the cross-shard-call fix from this binary's own history) is now `global_entry_points()`, a
+  hook any format can opt into instead of an NSO-only code path.
+- **ELF (`.so`)** is new — `formats/elf.py`, added as a from-scratch test that the plugin system
+  actually works: zero changes to `parallel_analyze.py`/`shard_worker.py`/the registry were
+  needed to support it.
+- NSO also picks up real density-balanced sharding (previously equal-width only, since it had no
+  PE-style section table to drive a prescan) — `handler.read_bytes()` now gives the density
+  scanner decompressed `.text` bytes for any format, not just flat PE images.
+- `spectrida formats` lists registered handlers. See README's "Adding a new binary format".
+- `tests/test_formats.py` — sniff/prepare/decompression/registry coverage for all four built-ins,
+  pure Python, no IDA/idalib required.
+
 ## 0.2.3 — the ghost installs its own help
 
 0.2.2 fixed the model-file half of "MCP naming needs manual setup." This closes the other half:

@@ -36,13 +36,26 @@ entries_path = sys.argv[6] if len(sys.argv) > 6 else None
 def log(msg: str):
     print(f"[shard {shard_start:#x}] {msg}", flush=True)
 
+from spectrida.analysis.formats import detect as detect_format
+
+handler = detect_format(binary)
+image = handler.prepare(binary, workdir=os.path.dirname(binary))
+
 import idapro
 
 idapro.enable_console_messages(False)
 
-rc = idapro.open_database(binary, run_auto_analysis=False)
+rc = idapro.open_database(image.binary_path, run_auto_analysis=False)
 if rc != 0:
     sys.exit(f"open_database failed rc={rc}")
+
+# IDA has no native NSO loader -- open_database() above just dumps the raw
+# (possibly still LZ4-compressed) file bytes into whatever segment its
+# generic Binary File fallback creates, at the wrong base, on the wrong
+# processor. post_open() (no-op for formats IDA loads natively) is where a
+# handler like NSO decompresses + remaps it properly before any scanning
+# happens.
+handler.post_open()
 
 import ida_bytes
 import ida_segment
@@ -50,22 +63,16 @@ import idaapi
 import idautils
 import idc
 
-# IDA has no native NSO loader -- open_database() above just dumps the raw
-# (possibly still LZ4-compressed) file bytes into whatever segment its
-# generic Binary File fallback creates, at the wrong base, on the wrong
-# processor. Decompress + remap it properly before any scanning happens.
-is_nso = Path(binary).read_bytes()[:4] == b"NSO0"
-if is_nso:
-    from nso_loader import load_into_ida
-    load_into_ida(binary)
-
 # ── Detect arch ───────────────────────────────────────────────────────────────
-# A caller that already knows the binary format (e.g. NSO == always AArch64 on
-# Switch) can hand it down directly -- IDA's headless binary loader has no
-# native NSO support and silently defaults to metapc, so procname can't be
-# trusted to tell us this on its own.
+# Priority: explicit CLI override > the handler's own hint > IDA's own
+# detection. A caller that already knows the binary format (e.g. NSO ==
+# always AArch64 on Switch) can hand it down directly -- IDA's headless
+# binary loader has no native NSO support and silently defaults to metapc,
+# so procname can't be trusted to tell us this on its own.
 if arch_hint:
     arch = arch_hint
+elif image.arch:
+    arch = image.arch
 else:
     try:
         info = idaapi.get_inf_structure()

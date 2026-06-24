@@ -144,6 +144,15 @@ def serve():
 
 
 @app.command()
+def formats():
+    """List registered binary-format handlers (built-in + plugins)."""
+    from spectrida.analysis.formats import list_handlers
+
+    for handler in list_handlers():
+        typer.echo(f"{handler.name:<10} {handler.__class__.__module__}.{handler.__class__.__qualname__}")
+
+
+@app.command()
 def mcp():
     """Run the MCP server so Claude (or any MCP client) can query indexed
     binaries — search functions, walk callers/callees, pull pseudocode,
