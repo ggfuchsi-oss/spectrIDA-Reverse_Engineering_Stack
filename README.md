@@ -8,6 +8,10 @@ A local, AI-powered reverse engineering assistant: parallel IDA Pro analysis, AI
 naming, a terminal that doesn't suck, a Neo4j knowledge graph of everything it's ever figured
 out, and an MCP server so Claude can search and chain through that graph directly.
 
+And now — with [phantomrt](#chapter-3--the-ghost-walks-through-walls) — it doesn't just read the
+walls. It walks through them: emulates, hooks, and fuzzes the functions it named, and writes what
+*actually happens* back onto the graph.
+
 </div>
 
 ```
@@ -46,8 +50,14 @@ Binary  ─▶  Parallel IDA Analysis  ─▶  Demangle  ─▶  AI Naming  ─�
                                                        only)         across sessions)
 ```
 
+Chapter 3 ([phantomrt](#chapter-3--the-ghost-walks-through-walls)) adds the half that static
+tools never have: it **runs** the code. Emulates a function with no OS (works on binaries you
+can't even launch, like a Switch `.nso`), or hooks the live process, or fuzzes it — and stamps
+the verdict (`crashes` / `needs live state` / `clean`) onto the same graph node as the name.
+
 Full rundown, including what's still on the to-do pile, is down in
-[Chapter 2](#chapter-2--the-ghost-learns-to-talk-back).
+[Chapter 2](#chapter-2--the-ghost-learns-to-talk-back) and
+[Chapter 3](#chapter-3--the-ghost-walks-through-walls).
 
 It is not Ghidra. It does one annoying thing (slow analysis + naming) fast, and it's genuinely fun
 to use. **199 downloads speak for themselves.**
@@ -444,6 +454,64 @@ of staring at one function at a time.
 - **Deobfuscation** — TigressVM pattern detection and handler tracing
 - **Actual patching** — the disassembly is in the graph now so an agent *can* plan a byte-level
   patch; turning "here's the exact instruction to change" into "and here's the write" is next.
+
+---
+
+## Chapter 3 — the ghost walks through walls
+
+Chapters 1 and 2 read the binary and remember it. But reading a function tells you what it *is*,
+never what it *does* when you pull the trigger. Chapter 3 — [**phantomrt**](https://pypi.org/project/phantomrt/) —
+pulls the trigger.
+
+```bash
+pip install "spectrida[atlas]"
+```
+
+It takes a function spectrIDA already named and does one of three haunted things to it:
+
+- **Emulate** it (Unicorn, no OS, any arch) — the only door that works on binaries you *can't*
+  launch, like a Switch `.nso` or an Android `.so`.
+- **Live-instrument** it (Frida) — attach to the *running* process and watch real args and return
+  values, for the functions emulation can only shrug at because they need real state.
+- **Fuzz** it — mutated inputs (seeds you bring, or ones it *carves out of the binary itself*),
+  catch the crashes, keep the reproducing input.
+
+Then it stamps the verdict onto the same Neo4j node as `dyn_*` properties, so the agent walking
+the graph sees the name **and** the behavior in one place. Six new MCP tools —
+`emulate_function`, `hunt_crashes`, `live_trace`, `dynamic_overview`, `risk_functions`,
+`learn_vm` — all backing the one graph. The reasoning corner is whatever LLM is driving; phantomrt
+just makes sure it has real runtime facts to reason with instead of vibes.
+
+```
+spectrIDA (names it)  ─▶  phantomrt (runs it)  ─▶  graph (dyn_status / crash / live args)  ─▶  the agent reasons
+```
+
+**And, in the spirit of the NSO horror story above:** the first real bug-hunt honestly found
+*nothing* — and the reason was more interesting than a crash would have been. Pointed at a
+genuinely old, genuinely vulnerable FreeType, blind fuzzing got zero. Coverage-guided fuzzing then
+reported a triumphant **64,000 edges** covered — which was a lie, because the binary was PIE and
+ASLR was quietly re-randomizing the addresses every run, so "new coverage" was mostly the loader
+shuffling the deck. Disable ASLR, honest number drops to a *real* 727 edges, and it plateaus
+there — because every seed was a TrueType font, so the fuzzer was trapped inside one parser and
+couldn't structurally mutate its way into the CFF/Type1/BDF code where the bugs actually live. The
+fix wasn't a smarter mutator, it was better seeds: the agent fetched real OpenType/Type1/BDF
+samples, coverage jumped 727 → 4,013 before a single fuzz iteration, and it explored properly.
+Still no crash in the budget — which is the honest state of a 3-minute run on one core versus a
+job that normally takes hours. The machinery is real. It caught its *own* fake number instead of
+reporting it. That's the whole point.
+
+**Honest ghost disclaimer:** phantomrt is `0.1.0`. Alpha. It's a solid dynamic layer, not a magic
+bug oracle — it found planted bugs in a toy target instantly, and on real targets it tells you
+honestly when it's stuck (`needs_state`), when a crash is only a *candidate* (go verify the
+pointer's actually input-controlled), and when it just needs more time and better seeds. Switch
+binaries don't run live — Frida needs something it can launch — so there, emulation is the only
+door and it'll say `needs_state` a lot. That's honest, not broken.
+
+It's the heavy extra on purpose (`torch`, `unicorn`, `frida`) — the base `pip install spectrida`
+pulls none of it. Source lives in [`phantomrt/`](phantomrt/); its own ghost-flavored README is
+[right there](phantomrt/README.md).
+
+*The static ghost names your functions. This one makes them confess.* 👻
 
 ---
 
