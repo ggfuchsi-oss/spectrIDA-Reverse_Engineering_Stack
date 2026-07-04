@@ -103,6 +103,13 @@ def run_onboarding(force: bool = False) -> None:
             if ans == "y":
                 c.print(f"  [cyan]pulling {_MODEL} — go get that coffee…[/]")
                 subprocess.run(["ollama", "pull", _MODEL])
+                # The runtime references the bare name `spectrida-re` everywhere,
+                # but `ollama pull hf.co/.../spectrida-re-gguf` stores it under that
+                # long name. Ollama needs the EXACT name for `show`/inference, so
+                # alias it — otherwise `ollama show spectrida-re` fails and the
+                # llama-server model path never resolves (configured:false forever).
+                subprocess.run(["ollama", "cp", _MODEL, "spectrida-re"])
+                c.print("  [green]✓[/]  aliased to [b]spectrida-re[/] for the runtime.")
             else:
                 c.print(f"       [dim]later, then:  ollama pull {_MODEL}[/]")
 

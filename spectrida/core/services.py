@@ -11,6 +11,32 @@ from pathlib import Path
 
 import httpx
 
+
+def _spawn_service(cmd, *, cwd=None, env=None, log_name="service"):
+    """Spawn a long-lived background service that OUTLIVES this launcher.
+
+    CREATE_NEW_PROCESS_GROUP alone is not enough on Windows: when the launcher
+    runs inside a Job Object (the MCP host / start_all worker), the child is
+    killed the moment that job closes — which is why llama-server/Neo4j would
+    'start then vanish'. DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB frees the
+    child from the job so it survives; we fall back if the job forbids breakaway.
+    Output goes to a logfile (not DEVNULL) so a failed launch is diagnosable
+    instead of silent.
+    """
+    logdir = Path.home() / ".spectrida" / "logs"
+    logdir.mkdir(parents=True, exist_ok=True)
+    logf = open(logdir / f"{log_name}.log", "ab")
+    kw = dict(cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=logf, stderr=logf)
+    if sys.platform == "win32":
+        base = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        try:
+            return subprocess.Popen(
+                cmd, creationflags=base | subprocess.CREATE_BREAKAWAY_FROM_JOB, **kw)
+        except OSError:
+            return subprocess.Popen(cmd, creationflags=base, **kw)
+    return subprocess.Popen(cmd, start_new_session=True, **kw)
+
+
 from spectrida.config import (
     graph_password,
     graph_uri,
@@ -76,7 +102,10 @@ async def installed_models() -> list[str]:
 
 async def model_present(model: str | None = None) -> bool:
     model = model or ollama_model()
-    return any(model in n for n in await installed_models())
+    # Exact match (optionally tagged). A substring check falsely passes when only
+    # `hf.co/.../spectrida-re-gguf` is installed but inference/`ollama show` need
+    # the exact `spectrida-re` — which is the name the runtime actually calls.
+    return any(n == model or n.startswith(f"{model}:") for n in await installed_models())
 
 
 async def ensure_model_loaded() -> bool:
@@ -167,13 +196,18 @@ async def ensure_llama_server(timeout_s: float = 120) -> bool:
     if not exe_path or not llama_model_path():
         return False
     exe = Path(exe_path)
+    # llama-server defaults to port 8080, but everything here polls the naming
+    # URL's port (8090). Without forcing --port they never agree and the launch
+    # looks "stuck/dead" while llama is actually serving, just on the wrong port.
+    args = list(llama_extra_args())
+    if not any(a in ("--port", "-p") for a in args):
+        from urllib.parse import urlparse
+        port = urlparse(naming_health_url()).port or 8090
+        args += ["--port", str(port)]
     try:
-        subprocess.Popen(
-            [str(exe), "-m", llama_model_path(), *llama_extra_args()],
-            cwd=str(exe.parent), stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-        )
+        _spawn_service(
+            [str(exe), "-m", llama_model_path(), *args],
+            cwd=str(exe.parent), log_name="llama-server")
     except Exception:
         return False
     elapsed = 0.0
@@ -228,11 +262,7 @@ async def ensure_neo4j(timeout_s: float = 60) -> bool:
         env["JAVA_HOME"] = java_home()
         env["PATH"] = str(Path(java_home()) / "bin") + os.pathsep + env.get("PATH", "")
     try:
-        subprocess.Popen(
-            [str(bat), "console"], env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
-        )
+        _spawn_service([str(bat), "console"], env=env, log_name="neo4j")
     except Exception:
         return False
     elapsed = 0.0
