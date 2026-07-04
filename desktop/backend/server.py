@@ -187,7 +187,12 @@ async def dyn_emulate(req: EmuReq):
     except Exception as e:
         raise HTTPException(400, str(e))
     a = _addr(req.addr)
-    res = await asyncio.to_thread(emulate_one, g(), req.binary, a, req.binary_path)
+    try:
+        res = await asyncio.to_thread(emulate_one, g(), req.binary, a, req.binary_path)
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e).split(".")[0])   # clean, not a stack trace
+    except Exception as e:
+        raise HTTPException(400, f"{type(e).__name__}: {e}")
     facts = {"status": res["verdict"], "note": res["note"], "reachable": res["reachable"],
              "blocks": res["blocks"], "tool": "atlas-emulate"}
     if res.get("crash_input"):
@@ -217,8 +222,13 @@ async def dyn_hunt(req: HuntReq):
     except Exception as e:
         raise HTTPException(400, str(e))
     a = _addr(req.addr)
-    res = await asyncio.to_thread(hunt, g(), req.binary, a, req.binary_path,
-                                  req.seeds_dir, req.rounds)
+    try:
+        res = await asyncio.to_thread(hunt, g(), req.binary, a, req.binary_path,
+                                      req.seeds_dir, req.rounds)
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e).split(".")[0])
+    except Exception as e:
+        raise HTTPException(400, f"{type(e).__name__}: {e}")
     facts = {"status": res["verdict"], "reachable": res["reachable"],
              "crashes": res["unique_crashes"], "tool": "atlas-hunt"}
     ci = list(res["crash_inputs"].values())
@@ -247,8 +257,13 @@ async def dyn_live(req: LiveReq):
     except Exception as e:
         raise HTTPException(400, str(e))
     addrs = [_addr(a) for a in req.addresses]
-    res = await asyncio.to_thread(live_trace, g(), req.binary, addrs,
-                                  req.binary_path, float(req.seconds))
+    try:
+        res = await asyncio.to_thread(live_trace, g(), req.binary, addrs,
+                                      req.binary_path, float(req.seconds))
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e).split(".")[0])
+    except Exception as e:
+        raise HTTPException(400, f"{type(e).__name__}: {e}")
     return res
 
 
