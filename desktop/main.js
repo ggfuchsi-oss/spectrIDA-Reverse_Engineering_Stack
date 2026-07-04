@@ -88,6 +88,17 @@ function isBackendUp() {
   });
 }
 
+// Only one instance — a second `npm start` just focuses the existing window
+// instead of spawning a rival backend that fights for the port (the thing that
+// jammed launches during testing).
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (win) { if (win.isMinimized()) win.restore(); win.show(); win.focus(); }
+  });
+}
+
 app.whenReady().then(async () => {
   // Reuse a backend that's already alive (e.g. left from a previous run) instead
   // of spawning a second one that would fail to bind the port.
