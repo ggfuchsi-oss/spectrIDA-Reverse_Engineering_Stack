@@ -148,17 +148,35 @@ async def analyze(req: AnalyzeReq):
     tag = req.tag or Path(req.path).name
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {"status": "running", "tag": tag, "progress": "queued",
-                     "created": time.time(), "result": None, "error": None}
+                     "created": time.time(), "result": None, "error": None,
+                     "lines": [], "seen": 0}
 
     async def _run():
         job = _jobs[job_id]
         try:
             from spectrida.core.pipeline import run_analysis
             from spectrida.core.populate import populate_graph
-            # phase 1: parallel analysis. on_line MUST be async (run_analysis awaits
-            # it) — passing a sync lambda causes `await None`. None is fine.
-            job["progress"] = "parallel analysis…"
-            result = await run_analysis(req.path, None, on_line=None)
+            # phase 1: parallel analysis. Stream the pipeline's own log lines so the
+            # UI shows live shard/merge progress instead of a static "analysing…".
+            # on_line MUST be async (run_analysis awaits it) — a sync lambda would
+            # cause `await None`.
+            job["progress"] = "starting parallel analysis…"
+            job["phase"] = "analyze"; job["started"] = time.time()
+
+            def log_line(line: str):
+                line = (line or "").rstrip()
+                if not line:
+                    return
+                job["progress"] = line.strip()[:140]
+                job["lines"].append(line[:200])
+                if len(job["lines"]) > 400:          # keep the tail
+                    job["lines"] = job["lines"][-400:]; job["seen"] += 1
+
+            async def on_line(line: str):
+                log_line(line)
+
+            log_line("👻 waking the ghost…")
+            result = await run_analysis(req.path, None, on_line=on_line)
             if "error" in result:
                 job["status"] = "error"; job["error"] = result["error"]; return
             i64 = result.get("i64")
@@ -166,13 +184,16 @@ async def analyze(req: AnalyzeReq):
                 job["status"] = "error"; job["error"] = "no .i64 produced"; return
             g().register_binary(tag, i64, binary_path=req.path)
             # phase 2: AI-name the functions + populate the graph
-            job["progress"] = "naming functions…"
+            log_line(f"⚑ analysis done — {result.get('funcs')} functions. naming…")
             db = await live_db(tag)
 
             async def prog(done, total):
                 job["progress"] = f"naming {done}/{total} functions"
+                if done % 50 == 0 or done == total:
+                    log_line(f"  named {done}/{total}")
 
             pop = await populate_graph(db, g(), tag, limit=2000, min_size=20, on_progress=prog)
+            log_line("✓ ghosted through it. done.")
             job["result"] = {"tag": tag, "i64": i64, "functions": result.get("funcs"), "named": pop}
             job["status"] = "done"
             job["progress"] = f"done: {result.get('funcs')} functions"
@@ -225,7 +246,10 @@ def job(job_id: str):
     j = _jobs.get(job_id)
     if not j:
         raise HTTPException(404, "no such job")
-    return {"job_id": job_id, **{k: j[k] for k in ("status", "tag", "progress", "result", "error")}}
+    out = {"job_id": job_id, **{k: j[k] for k in ("status", "tag", "progress", "result", "error")}}
+    out["elapsed"] = round(time.time() - j.get("created", time.time()))
+    out["lines"] = j.get("lines", [])
+    return out
 
 
 # ── dynamic (phantomrt) ─────────────────────────────────────────────────────────

@@ -211,23 +211,67 @@ const dz = $("#dropzone");
 ["dragleave", "drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove("over"); }));
 dz.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) setPending(f.path); });
 
+// the ghost's own quips (from spectrida/voice.py) — rotated while it works
+const QUIP_OPEN = ["Phasing through the call graph", "Haunting your .text section",
+  "Possessing the disassembler", "Drifting between basic blocks", "Sharding this poor binary",
+  "Spectrally indexing symbols", "Floating through the import table", "Dissecting control flow",
+  "Chewing through opcodes", "Walking the xref graph", "Decoding instruction soup",
+  "Slicing the binary 16 ways", "Auditing every prologue", "Mapping the address space",
+  "Stalking the entry point", "Tracing every CALL", "Unpacking the packed",
+  "Parsing the unparseable", "Ghosting through the .data"];
+const QUIP_CLOSE = ["at unreasonable speed", "like it owes me money", "with zero coffee breaks",
+  "in parallel, obviously", "across all your cores", "without asking permission",
+  "with mild enthusiasm", "out of pure spite", "because someone has to",
+  "like a caffeinated intern", "with surgical disinterest", "at terminal velocity",
+  "one shard at a time", "and judging the code quietly"];
+const pick = (a) => a[Math.floor(Math.random() * a.length)];
+function newQuip() { return `👻 ${pick(QUIP_OPEN)} ${pick(QUIP_CLOSE)}`; }
+
+function lineClass(t) {
+  if (/\[merge\]|merge|auto_wait/i.test(t)) return "merge";
+  if (/shard|worker|prologue/i.test(t)) return "shard";
+  if (/👻|ghost|waking/i.test(t)) return "ghost";
+  if (/✓|done|✧|named \d/i.test(t)) return "done";
+  return "";
+}
+function fmtElapsed(s) { const m = Math.floor(s / 60); return m ? `${m}m ${s % 60}s` : `${s}s`; }
+
 $("#start-index").onclick = async () => {
   if (!pending) return;
   $("#index-progress").hidden = false;
   $("#start-index").disabled = true;
-  const line = $("#ip-line"), fill = $("#ip-fill");
-  line.textContent = "starting…"; fill.style.width = "8%";
+  const term = $("#ip-term"), fill = $("#ip-fill"), bar = $("#ip-bar") || fill.parentElement;
+  const quipEl = $("#ip-quip"), statusEl = $("#ip-status"), elEl = $("#ip-elapsed");
+  term.innerHTML = ""; fill.parentElement.classList.add("indet");
+  let lastCount = 0;
+  const quipTimer = setInterval(() => { quipEl.style.opacity = 0; setTimeout(() => { quipEl.textContent = newQuip(); quipEl.style.opacity = 1; }, 300); }, 3500);
+  quipEl.textContent = newQuip();
   try {
     const { job_id } = await api("/analyze", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path: pending }) });
-    let pct = 8;
     const poll = setInterval(async () => {
       const j = await api(`/jobs/${job_id}`);
-      line.textContent = j.progress || j.status;
-      pct = Math.min(pct + 4, 92); fill.style.width = pct + "%";
-      if (j.status === "done") { clearInterval(poll); fill.style.width = "100%"; line.textContent = j.progress; setTimeout(() => { modal.hidden = true; loadBinaries(); }, 900); }
-      else if (j.status === "error") { clearInterval(poll); fill.style.background = "var(--crash)"; line.textContent = "failed: " + (j.error || "").slice(0, 90); }
-    }, 1200);
-  } catch (e) { line.textContent = "error: " + e.message; }
+      const lines = j.lines || [];
+      // append only the new lines, auto-scroll
+      for (let i = lastCount; i < lines.length; i++) {
+        const d = document.createElement("span"); d.className = "l " + lineClass(lines[i]); d.textContent = lines[i];
+        term.appendChild(d);
+      }
+      if (lines.length !== lastCount) { lastCount = lines.length; term.scrollTop = term.scrollHeight; }
+      statusEl.textContent = j.progress || j.status;
+      elEl.textContent = "⏱ " + fmtElapsed(j.elapsed || 0);
+      if (j.status === "done") {
+        clearInterval(poll); clearInterval(quipTimer);
+        fill.parentElement.classList.remove("indet"); fill.style.width = "100%";
+        quipEl.textContent = "✓ ghosted through it.";
+        setTimeout(() => { modal.hidden = true; loadBinaries(); }, 1100);
+      } else if (j.status === "error") {
+        clearInterval(poll); clearInterval(quipTimer);
+        fill.parentElement.classList.remove("indet"); fill.style.background = "var(--crash)"; fill.style.width = "100%";
+        quipEl.textContent = "✕ the ghost tripped"; statusEl.textContent = "failed: " + (j.error || "").slice(0, 100);
+        $("#start-index").disabled = false;
+      }
+    }, 1000);
+  } catch (e) { clearInterval(quipTimer); $("#ip-status").textContent = "error: " + e.message; }
 };
 
 function escapeHtml(s) { return String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }

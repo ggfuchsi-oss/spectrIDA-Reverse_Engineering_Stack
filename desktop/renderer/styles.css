@@ -217,9 +217,24 @@ body {
 .link { background: none; border: none; color: var(--spectral); cursor: pointer; text-decoration: underline; font-family: var(--mono); font-size: 12.5px; }
 .dz-path { display: block; margin-top: 12px; font-size: 11px; color: var(--spectral); word-break: break-all; }
 .index-progress { margin: 0 24px 8px; }
-.ip-bar { height: 6px; background: var(--bg); border: 1px solid var(--line-2); overflow: hidden; }
-.ip-bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--spectral-2), var(--spectral)); box-shadow: var(--glow); transition: width .4s; }
-.ip-line { margin-top: 10px; font-size: 11px; color: var(--ink-dim); min-height: 15px; }
+.ip-quip { font-family: var(--display); font-size: 13px; color: var(--spectral); text-shadow: var(--glow); margin-bottom: 10px; min-height: 18px; transition: opacity .3s; }
+.ip-bar { height: 5px; background: var(--bg); border: 1px solid var(--line-2); overflow: hidden; position: relative; }
+.ip-bar i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--spectral-2), var(--spectral)); box-shadow: var(--glow); transition: width .5s; }
+.ip-bar.indet i { width: 35% !important; animation: sweep 1.4s ease-in-out infinite; }
+@keyframes sweep { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+.ip-term {
+  margin-top: 12px; height: 190px; overflow-y: auto; background: #060709;
+  border: 1px solid var(--line); padding: 10px 12px;
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.55; color: #8fa3bd;
+  white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; user-select: text;
+}
+.ip-term .l { display: block; }
+.ip-term .l.merge { color: var(--warn); }
+.ip-term .l.shard { color: var(--spectral-2); }
+.ip-term .l.ghost { color: var(--spectral); }
+.ip-term .l.done { color: var(--named); }
+.ip-foot { display: flex; justify-content: space-between; margin-top: 8px; font-size: 10.5px; color: var(--ink-faint); }
+.ip-foot #ip-elapsed { color: var(--ink-dim); }
 .modal-foot { padding: 16px 24px 22px; display: flex; justify-content: flex-end; }
 .ghost-btn { font-family: var(--display); }
 
