@@ -401,8 +401,13 @@ def main():
     # Each worker gets its OWN copy of the binary in a separate temp dir so
     # IDA's sidecar files (.id0/.id1/.nam/.til) don't collide. Created up
     # front since the format handler may need scratch space in prepare().
-    import shutil
+    import shutil, atexit
     tmpdir = Path(tempfile.mkdtemp(prefix="parallel_ida_"))
+    # Each shard is a full COPY of the binary (16 of them). On a 387MB-.text
+    # binary that's several GB — and if the run crashes before the explicit
+    # cleanup below, all of it leaks and eventually fills the disk. Register the
+    # cleanup with atexit so it ALWAYS runs, even on an unhandled exception.
+    atexit.register(shutil.rmtree, str(tmpdir), True)
 
     handler = detect_format(binary)
     print(f"[parallel_analyze] format: {handler.name}")
