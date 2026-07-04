@@ -205,7 +205,16 @@ modal.onclick = (e) => { if (e.target === modal) modal.hidden = true; };
 let pending = null;
 function resetModal() { pending = null; $("#dz-path").textContent = ""; $("#start-index").disabled = true; $("#index-progress").hidden = true; $("#ip-fill").style.width = "0"; }
 $("#browse-btn").onclick = async () => { if (!bridge.pickBinary) return; const p = await bridge.pickBinary(); if (p) setPending(p); };
-function setPending(p) { pending = p; $("#dz-path").textContent = p; $("#start-index").disabled = false; }
+async function setPending(p) {
+  pending = p; $("#dz-path").textContent = p; $("#start-index").disabled = false;
+  // quick pre-run estimate from file size
+  try {
+    const est = await api(`/estimate?path=${encodeURIComponent(p)}`);
+    const warn = est.large ? " ⚠ large — needs plenty of free disk" : "";
+    $("#dz-path").innerHTML = `${escapeHtml(p)}<br><span style="color:var(--ink-dim)">` +
+      `${est.size_mb} MB · est. ~${fmtElapsed(est.eta_seconds)}${warn}</span>`;
+  } catch (_) {}
+}
 const dz = $("#dropzone");
 ["dragover", "dragenter"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("over"); }));
 ["dragleave", "drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove("over"); }));
@@ -258,7 +267,13 @@ $("#start-index").onclick = async () => {
       }
       if (lines.length !== lastCount) { lastCount = lines.length; term.scrollTop = term.scrollHeight; }
       statusEl.textContent = j.progress || j.status;
-      elEl.textContent = "⏱ " + fmtElapsed(j.elapsed || 0);
+      // elapsed, plus ETA/remaining once the density scan gave us a function count
+      let t = "⏱ " + fmtElapsed(j.elapsed || 0);
+      if (j.eta_s) {
+        const rem = Math.max(0, j.eta_s - (j.elapsed || 0));
+        t += `  ·  ~${fmtElapsed(rem)} left  (est. ${fmtElapsed(j.eta_s)})`;
+      }
+      elEl.textContent = t;
       if (j.status === "done") {
         clearInterval(poll); clearInterval(quipTimer);
         fill.parentElement.classList.remove("indet"); fill.style.width = "100%";

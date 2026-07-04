@@ -20,9 +20,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
+
+
+def estimate_seconds(prologues: int, naming: bool = True, name_limit: int = 2000) -> int:
+    """Rough ETA from function/prologue count, calibrated on a measured run
+    (main.nso: ~28k funcs -> 83s parallel + 152s merge auto_wait). The merge is
+    ~linear in function count and dominates; parallel is partly amortised by
+    cores; naming is a per-function model inference (capped). Deliberately a
+    rough estimate — labelled as such in the UI."""
+    parallel = prologues * 0.0032          # ~3.2 ms/func across 16 workers
+    merge    = prologues * 0.0055          # ~5.5 ms/func, single-threaded auto_wait
+    name     = (min(prologues, name_limit) * 0.9) if naming else 0   # ~0.9s/func
+    return int(parallel + merge + name + 15)   # + fixed startup
 
 logging.getLogger("neo4j").setLevel(logging.ERROR)
 
@@ -141,6 +154,22 @@ class AnalyzeReq(BaseModel):
     tag: str | None = None
 
 
+@app.get("/estimate")
+def estimate(path: str):
+    """Quick pre-run estimate from file size (rough — the accurate ETA comes once
+    the density scan reports the real function count during the run)."""
+    p = Path(path)
+    if not p.exists():
+        raise HTTPException(400, "file not found")
+    mb = p.stat().st_size / 1e6
+    # very rough: ~2000 functions per MB of file for a code-dense DLL/IL2CPP,
+    # far fewer for a small exe. Clamp to a sane band; it's just a heads-up.
+    approx_funcs = int(mb * 1800)
+    eta = estimate_seconds(approx_funcs)
+    return {"size_mb": round(mb, 1), "approx_functions": approx_funcs,
+            "eta_seconds": eta, "large": mb > 100}
+
+
 @app.post("/analyze")
 async def analyze(req: AnalyzeReq):
     if not Path(req.path).exists():
@@ -171,6 +200,13 @@ async def analyze(req: AnalyzeReq):
                 job["lines"].append(line[:200])
                 if len(job["lines"]) > 400:          # keep the tail
                     job["lines"] = job["lines"][-400:]; job["seen"] += 1
+                # once the density scan reports the prologue count, compute an ETA
+                m = re.search(r"density scan:\s*(\d+)\s*prologues", line)
+                if m and not job.get("eta_s"):
+                    n = int(m.group(1))
+                    job["eta_s"] = estimate_seconds(n)
+                    job["lines"].append(f"⏱ ~{job['eta_s']//60}m estimated "
+                                        f"({n:,} functions — rough)")
 
             async def on_line(line: str):
                 log_line(line)
@@ -249,6 +285,7 @@ def job(job_id: str):
     out = {"job_id": job_id, **{k: j[k] for k in ("status", "tag", "progress", "result", "error")}}
     out["elapsed"] = round(time.time() - j.get("created", time.time()))
     out["lines"] = j.get("lines", [])
+    out["eta_s"] = j.get("eta_s")
     return out
 
 
