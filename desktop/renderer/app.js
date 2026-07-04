@@ -15,12 +15,14 @@ const dynClass = (s) => s === "candidate_crash" ? "crash" : s === "needs_state" 
 const dynLabel = (s) => ({ candidate_crash: "candidate crash", needs_state: "needs state", exercised_clean: "clean", inconclusive: "inconclusive" }[s] || s);
 
 // ── boot ──────────────────────────────────────────────────────
-// window.ghost is the Electron preload bridge. Guard every use so the renderer
-// also runs in a plain browser (dev / screenshot) against the default backend.
-const ghost = window.ghost || {};
+// window.ghost is the Electron preload bridge. Use a differently-named local ref —
+// a top-level `const ghost` would collide with the global `ghost` property the
+// bridge defines and throw "already declared", killing the whole script. Guard
+// every use so the renderer also runs in a plain browser (dev/screenshot).
+const bridge = window.ghost || {};
 async function boot() {
-  if (ghost.backendUrl) { try { API = await ghost.backendUrl(); } catch (_) {} }
-  if (ghost.onBackendReady) ghost.onBackendReady(() => connect());
+  if (bridge.backendUrl) { try { API = await bridge.backendUrl(); } catch (_) {} }
+  if (bridge.onBackendReady) bridge.onBackendReady(() => connect());
   connect();
 }
 async function connect() {
@@ -170,7 +172,7 @@ $("#modal-close").onclick = () => modal.hidden = true;
 modal.onclick = (e) => { if (e.target === modal) modal.hidden = true; };
 let pending = null;
 function resetModal() { pending = null; $("#dz-path").textContent = ""; $("#start-index").disabled = true; $("#index-progress").hidden = true; $("#ip-fill").style.width = "0"; }
-$("#browse-btn").onclick = async () => { if (!ghost.pickBinary) return; const p = await ghost.pickBinary(); if (p) setPending(p); };
+$("#browse-btn").onclick = async () => { if (!bridge.pickBinary) return; const p = await bridge.pickBinary(); if (p) setPending(p); };
 function setPending(p) { pending = p; $("#dz-path").textContent = p; $("#start-index").disabled = false; }
 const dz = $("#dropzone");
 ["dragover", "dragenter"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("over"); }));
