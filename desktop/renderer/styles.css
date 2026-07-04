@@ -128,6 +128,11 @@ body {
 #search:focus { border-color: var(--spectral-2); box-shadow: 0 0 0 1px rgba(110,231,255,.15); }
 #search::placeholder { color: var(--ink-faint); }
 .search-hint { position: absolute; right: 20px; top: 21px; font-size: 10px; color: var(--ink-faint); }
+.name-bar { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px 0; gap: 8px; }
+.name-bar #name-info { font-size: 10.5px; color: var(--ink-faint); }
+.btn.tiny { font-size: 10px; padding: 5px 9px; }
+.btn.tiny.busy { color: var(--spectral); border-color: var(--spectral-2); }
+.btn.tiny.busy::after { content: " ▓"; animation: blink 1s steps(2) infinite; }
 .fn-list { overflow-y: auto; flex: 1; }
 .fn-item {
   display: flex; justify-content: space-between; align-items: center; gap: 8px;

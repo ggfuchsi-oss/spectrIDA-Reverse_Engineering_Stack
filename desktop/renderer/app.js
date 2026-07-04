@@ -61,10 +61,42 @@ async function loadBinaries() {
 function selectBinary(b, item) {
   document.querySelectorAll(".bin-item").forEach(x => x.classList.remove("active"));
   item.classList.add("active");
-  state.binary = b.tag; state.binaryPath = b.path;
+  state.binary = b.tag; state.binaryPath = b.path; state.bin = b;
   $("#search").value = "";
+  // "name the rest" bar — only when there are still unnamed (sub_*) functions
+  const unnamed = (b.funcs || 0) - (b.named || 0);
+  const bar = $("#name-bar");
+  if (unnamed > 0) {
+    bar.hidden = false;
+    $("#name-info").textContent = `${unnamed.toLocaleString()} unnamed`;
+    $("#name-btn").disabled = false; $("#name-btn").className = "btn tiny";
+    $("#name-btn").textContent = "✧ Name the rest";
+  } else { bar.hidden = true; }
   loadFunctions("");
 }
+
+// name the remaining sub_* functions of the selected binary
+$("#name-btn").onclick = async () => {
+  if (!state.binary) return;
+  const btn = $("#name-btn"), info = $("#name-info");
+  btn.className = "btn tiny busy"; btn.disabled = true; btn.textContent = "naming";
+  try {
+    const { job_id } = await api("/name", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ binary: state.binary, limit: 500 }) });
+    const poll = setInterval(async () => {
+      const j = await api(`/jobs/${job_id}`);
+      info.textContent = j.progress || j.status;
+      if (j.status === "done") {
+        clearInterval(poll);
+        btn.className = "btn tiny"; btn.textContent = "✧ Name the rest";
+        loadBinaries();            // refresh named counts
+        loadFunctions($("#search").value.trim());   // refresh the list with new names
+      } else if (j.status === "error") {
+        clearInterval(poll); btn.className = "btn tiny"; btn.disabled = false; btn.textContent = "retry";
+        info.textContent = "failed: " + (j.error || "").slice(0, 60);
+      }
+    }, 1500);
+  } catch (e) { btn.className = "btn tiny"; btn.disabled = false; info.textContent = "error: " + e.message; }
+};
 
 // ── functions ─────────────────────────────────────────────────
 let searchTimer;

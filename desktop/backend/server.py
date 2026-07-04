@@ -40,6 +40,7 @@ app.add_middleware(
 
 _graph: FunctionGraph | None = None
 _jobs: dict[str, dict] = {}
+_live: dict[str, object] = {}   # binary tag -> open live IDA handle (cached)
 
 
 def g() -> FunctionGraph:
@@ -47,6 +48,23 @@ def g() -> FunctionGraph:
     if _graph is None:
         _graph = FunctionGraph(config.graph_uri(), config.graph_user(), config.graph_password())
     return _graph
+
+
+async def live_db(binary: str):
+    """Open (and cache) a live idalib handle for a binary's registered .i64 —
+    needed for the AI naming pass. Reopening a big .i64 is slow, so it's cached."""
+    if binary in _live:
+        return _live[binary]
+    from spectrida.api import IDADatabase
+    from spectrida.core.backend import RealBackend
+    path = g().get_binary_path(binary)
+    if not path:
+        raise HTTPException(400, f"no .i64 registered for '{binary}'")
+    backend = RealBackend(path)
+    await backend.ensure_open()
+    db = IDADatabase(backend)
+    _live[binary] = db
+    return db
 
 
 def _hex(d: dict) -> dict:
@@ -136,17 +154,26 @@ async def analyze(req: AnalyzeReq):
         job = _jobs[job_id]
         try:
             from spectrida.core.pipeline import run_analysis
+            from spectrida.core.populate import populate_graph
+            # phase 1: parallel analysis. on_line MUST be async (run_analysis awaits
+            # it) — passing a sync lambda causes `await None`. None is fine.
             job["progress"] = "parallel analysis…"
-            result = await run_analysis(req.path, None, on_line=lambda ln: job.update(
-                progress=ln.strip()[:120]) if ln.strip() else None)
+            result = await run_analysis(req.path, None, on_line=None)
             if "error" in result:
                 job["status"] = "error"; job["error"] = result["error"]; return
             i64 = result.get("i64")
+            if not i64:
+                job["status"] = "error"; job["error"] = "no .i64 produced"; return
             g().register_binary(tag, i64, binary_path=req.path)
-            job["progress"] = "populating graph…"
-            from spectrida.core.populate import populate_graph
-            # populate uses live db; keep it simple — reuse pipeline's own populate if present
-            job["result"] = {"tag": tag, "i64": i64, "functions": result.get("funcs")}
+            # phase 2: AI-name the functions + populate the graph
+            job["progress"] = "naming functions…"
+            db = await live_db(tag)
+
+            async def prog(done, total):
+                job["progress"] = f"naming {done}/{total} functions"
+
+            pop = await populate_graph(db, g(), tag, limit=2000, min_size=20, on_progress=prog)
+            job["result"] = {"tag": tag, "i64": i64, "functions": result.get("funcs"), "named": pop}
             job["status"] = "done"
             job["progress"] = f"done: {result.get('funcs')} functions"
         except Exception as e:
@@ -156,6 +183,41 @@ async def analyze(req: AnalyzeReq):
 
     asyncio.create_task(_run())
     return {"job_id": job_id, "tag": tag}
+
+
+class NameReq(BaseModel):
+    binary: str
+    limit: int = 500
+
+
+@app.post("/name")
+async def name_functions(req: NameReq):
+    """Run the AI naming pass on the still-unnamed (sub_*) functions of an
+    already-indexed binary. Long-running → returns a job_id; poll /jobs."""
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "running", "tag": req.binary, "progress": "opening .i64…",
+                     "created": time.time(), "result": None, "error": None}
+
+    async def _run():
+        job = _jobs[job_id]
+        try:
+            from spectrida.core.populate import populate_graph
+            db = await live_db(req.binary)
+
+            async def prog(done, total):
+                job["progress"] = f"naming {done}/{total}"
+
+            pop = await populate_graph(db, g(), req.binary, limit=req.limit,
+                                       min_size=20, on_progress=prog)
+            job["result"] = {"named": pop}
+            job["status"] = "done"; job["progress"] = "done"
+        except Exception as e:
+            import traceback
+            job["status"] = "error"; job["error"] = f"{type(e).__name__}: {e}"
+            job["progress"] = traceback.format_exc()[-300:]
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id, "tag": req.binary}
 
 
 @app.get("/jobs/{job_id}")
