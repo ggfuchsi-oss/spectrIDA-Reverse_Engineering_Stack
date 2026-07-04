@@ -263,6 +263,11 @@ async def dyn_live(req: LiveReq):
     except FileNotFoundError as e:
         raise HTTPException(400, str(e).split(".")[0])
     except Exception as e:
+        msg = str(e).lower()
+        if "spawn" in msg or "unsupported" in msg or "executable" in msg:
+            raise HTTPException(400, "live trace needs a binary that RUNS on this "
+                "machine — Frida can't launch it (Switch NSO / other-arch binaries "
+                "can't run here). Use Emulate instead.")
         raise HTTPException(400, f"{type(e).__name__}: {e}")
     return res
 
