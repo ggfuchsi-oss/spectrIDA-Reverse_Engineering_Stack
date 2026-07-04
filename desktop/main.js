@@ -80,8 +80,22 @@ ipcMain.handle("pick-binary", async () => {
   return r.canceled ? null : r.filePaths[0];
 });
 
+function isBackendUp() {
+  return new Promise((resolve) => {
+    const req = http.get(`${BACKEND_URL}/health`, (res) => { res.resume(); resolve(true); });
+    req.on("error", () => resolve(false));
+    req.setTimeout(800, () => { req.destroy(); resolve(false); });
+  });
+}
+
 app.whenReady().then(async () => {
-  startBackend();
+  // Reuse a backend that's already alive (e.g. left from a previous run) instead
+  // of spawning a second one that would fail to bind the port.
+  if (await isBackendUp()) {
+    console.log("[backend] already running — reusing");
+  } else {
+    startBackend();
+  }
   createWindow();
   try {
     await waitForBackend();
