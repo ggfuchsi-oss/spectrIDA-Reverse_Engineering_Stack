@@ -298,6 +298,21 @@ def format_context_block(ctx: FunctionContext) -> str:
         fmt = [f"0x{c:X}" if c > 255 else str(c) for c in ctx.constants[:4]]
         lines.append("Key constants: " + ", ".join(fmt))
 
+    # ── IDB-as-RAG knowledge ──
+    if ctx.idb_knowledge:
+        from spectrida.idb_knowledge import format_knowledge_block
+        # Dedup against names already in context
+        already = set()
+        for c in ctx.callers:
+            if c.is_named:
+                already.add(c.name)
+        for c in ctx.callees:
+            if c.is_named:
+                already.add(c.name)
+        idb_block = format_knowledge_block(ctx.idb_knowledge, already)
+        if idb_block:
+            lines.append(idb_block)
+
     # ── overflow ──
     if ctx.summary:
         lines.append(ctx.summary)

@@ -375,7 +375,19 @@ class IDADatabase:
         """
         return await self._b.rtti()
 
-async def close(self) -> None:
+    async def refs(self, address):
+        """Get all referenced addresses from a function body."""
+        return await self._b.refs(address)
+
+    async def knowledge(self, addresses):
+        """Look up what IDA knows at a set of addresses."""
+        return await self._b.knowledge(addresses)
+
+    async def write_name(self, address, name, comment=""):
+        """Rename a function and optionally add a comment."""
+        return await self._b.write_name(address, name, comment)
+
+    async def close(self) -> None:
         await self._b.close()
 
 
