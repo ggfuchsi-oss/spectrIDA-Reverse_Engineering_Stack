@@ -158,15 +158,26 @@ def emulate_function(
 
         mu.hook_add(UC_HOOK_MEM_WRITE, on_mem_write)
 
-        # Execute (with timeout to avoid hangs)
+        # Execute — find ret/leave and stop before them
+        # ret = 0xc3, leave = 0xc9, retf = 0xcb
+        code_len = len(code_bytes)
+        stop_addr = base_addr + code_len
+        for i in range(code_len - 1, -1, -1):
+            if code_bytes[i] in (0xc3, 0xc9, 0xcb):
+                stop_addr = base_addr + i
+                break
+        
         try:
-            mu.emu_start(base_addr, base_addr + len(code_bytes), timeout=100000)
+            mu.emu_start(base_addr, stop_addr, timeout=100000)
         except Exception as e:
-            if "Invalid memory" not in str(e):
+            if "Invalid memory" not in str(e) and "Invalid instruction" not in str(e):
                 return EmulationResult(error=f"emulation error: {e}")
 
-        # Capture return value
-        ret = mu.reg_read(UC_X86_REG_RAX)
+        # Capture return value (RAX holds return in x64 ABI)
+        try:
+            ret = mu.reg_read(UC_X86_REG_RAX)
+        except Exception:
+            ret = 0
 
         # Build memory hash
         if memory_writes:
