@@ -1,58 +1,105 @@
-"""Walk an open .i64 and push functions + call edges into Neo4j, with two
-free/cheap passes before any AI call:
+"""Walk an open .i64 and push functions + call edges into Neo4j, with
+N-hop context (Phase 1+3), two-pass iterative naming (Phase 2), and
+Ollama/llama-server dual-backend support.
 
-  1. Demangle: any _Z-prefixed C++ name gets IDA's own demangler applied
-     (ground truth — the compiler's mangling already encodes the real name).
-  2. Tiny-function skip (min_size): thunks/stubs get indexed for graph
-     edges but never wasted on an AI naming call.
-
-Only what's left after those two — genuinely stripped sub_* functions above
-the size floor — goes to the LLM (via llama-server, concurrently chunked).
-
-Used by both scripts/populate_graph.py (standalone CLI) and the MCP server's
+Used by both scripts/populate_graph.py (standalone CLI) and the MCP server
 analyze_binary tool (chained right after a fresh analysis pass).
 """
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import httpx
 
-from spectrida.config import naming_llama_url
+from spectrida.config import naming_llama_url, ollama_model as _ollama_model
+from spectrida.context import format_context_block, gather_context
 
 if TYPE_CHECKING:
     from spectrida.api import IDADatabase
     from spectrida.core.graph import FunctionGraph
 
 BATCH_SIZE = 200
-PSEUDOCODE_CHARS = 3000   # snippet only — Claude can call get_full_pseudocode live for the rest
+PSEUDOCODE_CHARS = 3000
 
-# spectrIDA's own naming prompt feeds raw assembly + a NAME:/REASON: format,
-# which the validated checkpoint was never trained against (it degenerates
-# into repetitive reasoning text on that input shape). Also needs the EXACT
-# trained template — an empty forced <think></think> block — or it rambles.
 NAMING_SYSTEM = (
-    "You are an expert reverse engineer analyzing a stripped game binary.\n"
-    "Given decompiled pseudocode, respond with ONLY a single proposed function name, "
-    "nothing else — no explanation, no reasoning, just the name."
+    "You are an expert reverse engineer analyzing a stripped game binary. "
+    "The Context section shows what calls this function and what it calls -- "
+    "use this to INFER what the function does, do NOT copy function names from it. "
+    "Respond with ONLY a descriptive snake_case name for THIS function."
 )
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-async def name_from_pseudocode(pseudocode: str, http: httpx.AsyncClient, llama_url: str) -> str:
+
+def _strip_think(text: str) -> str:
+    """Remove Qwen3 think blocks from model output."""
+    return _THINK_RE.sub("", text).strip()
+
+
+def _chat(system: str, user_msg: str) -> str:
+    """Build a ChatML prompt."""
+    return (
+        "<im>system</im>\n" + system + "</im>\n"
+        "<im>user</im>\n" + user_msg + "</im>\n"
+        "<im>assistant</im>\n"
+    )
+
+
+async def name_from_pseudocode(
+    pseudocode: str,
+    http: httpx.AsyncClient,
+    llama_url: str,
+    *,
+    context_block: str = "",
+    ollama_model: str = "",
+) -> str:
+    """Name a function using pseudocode + optional N-hop context.
+
+    Supports Ollama (/api/generate) and llama-server (/completion).
+    If ollama_model is provided, uses Ollama; otherwise llama-server.
+    """
     if not pseudocode.strip():
         return ""
-    user = f"Pseudocode:\n```c\n{pseudocode[:2000]}\n```\n\nProposed function name:"
-    prompt = (
-        f"<|im_start|>system\n{NAMING_SYSTEM}<|im_end|>\n"
-        f"<|im_start|>user\n{user}<|im_end|>\n"
-        f"<|im_start|>assistant\n<think>\n\n</think>\n\n"
-    )
-    payload = {"prompt": prompt, "temperature": 0.3, "n_predict": 40}
-    resp = await http.post(llama_url, json=payload)
-    resp.raise_for_status()
-    text = resp.json().get("content", "").strip()
+
+    parts: list[str] = []
+    if context_block:
+        parts.append(context_block)
+    code_block = "Pseudocode:\n```c\n" + pseudocode[:2000] + "\n```"
+    parts.append(code_block)
+    user_msg = "\n\n".join(parts) + "\n\nProposed function name:"
+
+    prompt = _chat(NAMING_SYSTEM, user_msg)
+
+    # Retry with backoff — Ollama can hiccup under rapid-fire requests
+    last_err = None
+    for attempt in range(4):
+        try:
+            if ollama_model:
+                url = llama_url.rstrip("/") + "/api/generate"
+                payload = {
+                    "model": ollama_model, "prompt": prompt,
+                    "stream": False, "think": False,
+                    "options": {"temperature": 0.3, "num_predict": 40},
+                }
+                resp = await http.post(url, json=payload)
+                resp.raise_for_status()
+                text = _strip_think(resp.json().get("response", ""))
+            else:
+                payload = {"prompt": prompt, "temperature": 0.3, "n_predict": 40}
+                resp = await http.post(llama_url, json=payload)
+                resp.raise_for_status()
+                text = _strip_think(resp.json().get("content", ""))
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                await asyncio.sleep(1.0 * (attempt + 1))
+            else:
+                text = ""
+
     first_line = text.splitlines()[0].strip() if text else ""
     return first_line[:80]
 
@@ -72,9 +119,17 @@ async def populate_graph(
     name_chunk: int = 8,
     sample: str = "sequential",
     seed: int = 42,
+    passes: int = 2,
     on_progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> dict:
-    """Returns {"total": N, "named": N, "demangled": N, "attempted": N}."""
+    """Populate the Neo4j graph with functions, edges, and AI-generated names.
+
+    Args:
+        passes: number of naming passes (1 = pseudocode-only,
+                2 = context-enriched two-pass).
+
+    Returns dict with total, named, demangled, attempted, renamed_pass2.
+    """
     funcs = await db.list_functions()
 
     if sample == "random":
@@ -88,26 +143,23 @@ async def populate_graph(
         targets = targets[:limit]
 
     llama_url = naming_llama_url()
+    model = _ollama_model()
+
+    # -- Pass 1: collect data, name with context, write to graph ----------
     func_batch: list[dict] = []
     edge_batch: list[tuple[int, int]] = []
     named_count = 0
     demangled_count = 0
     attempted_count = 0
     done = 0
+    func_data: dict[int, dict] = {}
 
     async with httpx.AsyncClient(timeout=120) as http:
-        # Stage 1: IDA-side work (decompile + xrefs) is sequential — a single
-        # idalib worker process can't parallelize. Stage 2: naming calls go
-        # to llama-server's parallel slots concurrently, chunked so the slow
-        # IDA stage and the LLM stage don't block each other more than needed.
         for chunk_start in range(0, len(targets), name_chunk):
             chunk = targets[chunk_start: chunk_start + name_chunk]
 
-            # _Z = Itanium (GCC/Clang ELF/NSO), ? = MSVC (Windows PE) — IDA's
-            # demangle_name() auto-detects which one a given binary actually
-            # uses, but only if we actually hand it the mangled names.
-            mangled_names = [f["name"] for f in chunk if f["name"].startswith(("_Z", "?"))]
-            demangled = await db.demangle(mangled_names) if mangled_names else {}
+            mangled = [f["name"] for f in chunk if f["name"].startswith(("_Z", "?"))]
+            demangled = await db.demangle(mangled) if mangled else {}
             demangled_count += len(demangled)
 
             pending: list[dict] = []
@@ -126,8 +178,8 @@ async def populate_graph(
                 try:
                     callees = await db.xrefs_from(addr)
                     for c in callees:
-                        callee_addr = c["address"] if isinstance(c["address"], int) else int(c["address"], 16)
-                        edges.append((addr, callee_addr))
+                        ca = c["address"] if isinstance(c["address"], int) else int(c["address"], 16)
+                        edges.append((addr, ca))
                 except Exception:
                     pass
 
@@ -137,21 +189,24 @@ async def populate_graph(
                 except Exception:
                     pass
 
-                needs_naming = name.lower().startswith("sub_") and f.get("size", 0) >= min_size
+                needs = name.lower().startswith("sub_") and f.get("size", 0) >= min_size
+                func_data[addr] = {"pseudocode": pseudocode, "disasm": disasm,
+                                   "edges": edges, "name": name, "needs_naming": needs}
                 pending.append({"addr": addr, "name": name, "size": f.get("size", 0),
-                                "pseudocode": pseudocode, "disasm": disasm, "edges": edges,
-                                "needs_naming": needs_naming})
+                                "pseudocode": pseudocode, "disasm": disasm,
+                                "edges": edges, "needs_naming": needs})
 
             attempted_count += sum(1 for p in pending if p["needs_naming"])
-            naming_results = await asyncio.gather(
-                *[name_from_pseudocode(p["pseudocode"], http, llama_url) if p["needs_naming"]
+            results = await asyncio.gather(
+                *[_name_with_ctx(p, graph, binary, http, llama_url, model) if p["needs_naming"]
                   else _const("") for p in pending],
                 return_exceptions=True,
             )
 
-            for p, new_name in zip(pending, naming_results, strict=True):
+            for p, new_name in zip(pending, results, strict=True):
                 if not isinstance(new_name, Exception) and new_name:
                     p["name"] = new_name
+                    func_data[p["addr"]]["name"] = new_name
                     named_count += 1
                 func_batch.append({"addr": p["addr"], "name": p["name"],
                                    "size": p["size"], "pseudocode": p["pseudocode"],
@@ -171,5 +226,72 @@ async def populate_graph(
         graph.upsert_functions(binary, func_batch)
         graph.upsert_calls(binary, edge_batch)
 
-    return {"total": len(targets), "named": named_count,
-            "demangled": demangled_count, "attempted": attempted_count}
+    # -- Pass 2: re-name with enriched context ----------------------------
+    renamed_pass2 = 0
+    if passes >= 2:
+        func_batch_2: list[dict] = []
+
+        async with httpx.AsyncClient(timeout=120) as http2:
+            for addr, data in func_data.items():
+                if not data["needs_naming"] or not data["pseudocode"]:
+                    continue
+
+                old_name = data["name"]
+                ctx_block = ""
+                try:
+                    ctx = gather_context(graph, binary, addr, depth=2,
+                                         max_neighbors=10, pseudocode=data["pseudocode"])
+                    ctx_block = format_context_block(ctx)
+                except Exception:
+                    pass
+
+                new_name = await name_from_pseudocode(
+                    data["pseudocode"], http2, llama_url,
+                    context_block=ctx_block, ollama_model=model,
+                )
+
+                if new_name and new_name != old_name:
+                    data["name"] = new_name
+                    renamed_pass2 += 1
+
+                func_batch_2.append({
+                    "addr": addr, "name": data["name"],
+                    "size": data.get("size", 0),
+                    "pseudocode": data["pseudocode"],
+                    "disasm": data["disasm"],
+                })
+
+                if len(func_batch_2) >= BATCH_SIZE:
+                    graph.upsert_functions(binary, func_batch_2)
+                    func_batch_2 = []
+
+        if func_batch_2:
+            graph.upsert_functions(binary, func_batch_2)
+
+    return {
+        "total": len(targets), "named": named_count,
+        "demangled": demangled_count, "attempted": attempted_count,
+        "renamed_pass2": renamed_pass2,
+    }
+
+
+async def _name_with_ctx(
+    p: dict,
+    graph: FunctionGraph,
+    binary: str,
+    http: httpx.AsyncClient,
+    llama_url: str,
+    ollama_model: str = "",
+) -> str:
+    """Name a single function with N-hop context from the graph."""
+    ctx_block = ""
+    try:
+        ctx = gather_context(graph, binary, p["addr"], depth=2,
+                             max_neighbors=10, pseudocode=p["pseudocode"])
+        ctx_block = format_context_block(ctx)
+    except Exception:
+        pass
+    return await name_from_pseudocode(
+        p["pseudocode"], http, llama_url,
+        context_block=ctx_block, ollama_model=ollama_model,
+    )
