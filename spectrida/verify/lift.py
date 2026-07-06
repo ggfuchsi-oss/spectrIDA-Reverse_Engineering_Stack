@@ -8,6 +8,8 @@ provably-correct, editable source.
 """
 from __future__ import annotations
 
+import os
+
 import asyncio
 import re
 from dataclasses import dataclass, field
@@ -230,7 +232,7 @@ async def lift_function(
                 continue
 
             # 3. Compile
-            compile_result = compile_c_to_shared(c_code, f"/tmp/verify_{func_name}_{attempt_num}.so")
+            import tempfile as _tf; _fd, _dll = _tf.mkstemp(suffix=".dll"); os.close(_fd); compile_result = compile_c_to_shared(c_code, _dll)
             if not compile_result["ok"]:
                 attempt.compile_error = compile_result["error"][:300]
                 result.attempts.append(attempt)
@@ -241,7 +243,7 @@ async def lift_function(
 
             # 4. Extract bytes
             extract_result = extract_function_bytes(
-                compile_result["path"], func_name
+                _dll, func_name
             )
             if not extract_result["ok"]:
                 attempt.oracle_error = f"extract failed: {extract_result['error']}"
