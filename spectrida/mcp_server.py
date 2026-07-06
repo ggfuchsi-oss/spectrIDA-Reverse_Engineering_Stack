@@ -704,6 +704,154 @@ async def analyze_binary(
     }
 
 
+@mcp.tool()
+async def get_context(binary: str, address: str, depth: int = 2,
+                     max_neighbors: int = 10) -> dict:
+    """Phase 1+3: gather N-hop call-graph context for a function.
+
+    Returns callers, callees (ranked by: named first, closer hops first),
+    string literals referenced in the pseudocode, and distinctive constants.
+    This is the raw context that feeds the improved naming prompt.
+
+    Use this to understand WHY a function would be named a certain way —
+    the model sees this neighborhood when naming.
+    """
+    from spectrida.context import gather_context, format_context_block
+
+    addr = _norm_addr(address)
+    pseudocode = ""
+    try:
+        db = await _live_db(binary)
+        pseudocode = await db.decompile(addr)
+    except Exception:
+        # Fall back to cached pseudocode from graph
+        fn = _g().get_function(binary, addr)
+        if fn:
+            pseudocode = fn.get("pseudocode", "")
+
+    ctx = gather_context(_g(), binary, addr,
+                         depth=depth, max_neighbors=max_neighbors,
+                         pseudocode=pseudocode or "")
+    return {
+        "address": hex(addr),
+        "callers": [{"name": c.name, "addr": hex(c.addr),
+                      "hops": c.hops, "is_named": c.is_named}
+                     for c in ctx.callers],
+        "callees": [{"name": c.name, "addr": hex(c.addr),
+                      "hops": c.hops, "is_named": c.is_named}
+                     for c in ctx.callees],
+        "strings": ctx.strings,
+        "constants": [hex(c) if c > 255 else c for c in ctx.constants],
+        "context_block": format_context_block(ctx),
+    }
+
+
+@mcp.tool()
+async def baseline_naming(binary: str, sample_size: int = 100) -> dict:
+    """Phase 0: measure current naming accuracy on a sample of functions.
+
+    Picks up to `sample_size` functions (weighted toward larger ones),
+    reports how many are named vs sub_*, and gives a spot-check accuracy
+    estimate.  Run this BEFORE context naming to establish a baseline.
+    """
+    g = _g()
+    with g.driver.session() as s:
+        # Get all functions for this binary
+        rows = list(s.run(
+            "MATCH (f:Function {binary: $b}) "
+            "RETURN f.addr AS addr, f.name AS name, f.size AS size "
+            "ORDER BY f.size DESC",
+            b=binary))
+
+    total = len(rows)
+    named = sum(1 for r in rows if r["name"] and not r["name"].startswith("sub_"))
+    unnamed = total - named
+
+    # Spot-check: pick every Nth function for a sample
+    step = max(1, total // sample_size)
+    sample = rows[::step][:sample_size]
+
+    sample_named = sum(1 for r in sample if r["name"] and not r["name"].startswith("sub_"))
+    sample_unnamed = len(sample) - sample_named
+
+    return {
+        "binary": binary,
+        "total_functions": total,
+        "named": named,
+        "unnamed": unnamed,
+        "coverage_pct": round(100 * named / total, 1) if total else 0,
+        "sample_size": len(sample),
+        "sample_named": sample_named,
+        "sample_unnamed": sample_unnamed,
+        "note": "Run populate_binary with passes=2 after context naming to see improvement",
+    }
+
+
+@mcp.tool()
+async def populate_binary(
+    binary: str, limit: int | None = None, min_size: int = 0,
+    passes: int = 2,
+) -> dict:
+    """Re-populate the Neo4j graph for an already-analyzed binary with
+    full control over the naming pass.  Now supports multi-pass naming:
+
+      passes=1 : old behavior (pseudocode-only)
+      passes=2 : Phase 1+2 -- pass-2 uses pass-1 names as context
+                  (the snowball: more names -> better context -> more names)
+
+    This only runs the demangle + AI-naming pass on the existing .i64 --
+    it does NOT re-run the slow parallel analysis.
+
+    Returns immediately with a job_id -- use poll_analysis() to check status.
+    """
+    from spectrida.core.populate import populate_graph
+
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {
+        "status": "running",
+        "binary": binary,
+        "progress": f"demangling + AI naming ({passes} passes)...",
+        "created": time.time(),
+        "result": None,
+        "error": None,
+    }
+
+    async def _run() -> None:
+        job = _jobs[job_id]
+        try:
+            db = await _live_db(binary)
+
+            async def _on_progress(done: int, total: int) -> None:
+                job["progress"] = f"{done}/{total} functions processed"
+
+            result = await populate_graph(
+                db, _g(), binary,
+                limit=limit,
+                skip=0,
+                min_size=min_size,
+                name_chunk=8,
+                passes=passes,
+                on_progress=_on_progress,
+            )
+            job["status"] = "done"
+            job["result"] = result
+            job["progress"] = f"complete: {result}"
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            job["status"] = "error"
+            job["error"] = f"{type(exc).__name__}: {exc}"
+            job["progress"] = f"failed: {tb[-300:]}"
+
+    asyncio.create_task(_run())
+    return {
+        "job_id": job_id,
+        "status": "started",
+        "binary": binary,
+        "hint": f"call poll_analysis('{job_id}') to check progress",
+    }
+
+
 def main() -> None:
     mcp.run()
 
