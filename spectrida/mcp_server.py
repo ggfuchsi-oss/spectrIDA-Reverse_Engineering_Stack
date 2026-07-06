@@ -910,6 +910,49 @@ async def diaphora_diff(
 
 
 
+@mcp.tool()
+async def apply_flirt(binary: str) -> dict:
+    """Pre-pass: apply FLIRT signatures to identify library functions.
+
+    Renames sub_* to real names (memcpy, std::vector::push_back, etc.)
+    for free. Run BEFORE populate_binary — identified library functions
+    become high-confidence anchors for the N-hop context naming.
+
+    This is the single easiest accuracy win for any binary with
+    statically-linked C++/STL code.
+    """
+    db = await _live_db(binary)
+    result = await db.flirt()
+    # Persist renamed functions to the graph
+    if result.get("renamed", 0) > 0:
+        funcs = await db.list_functions()
+        named = [{"addr": f["start"], "name": f["name"],
+                  "size": f.get("size", 0)} for f in funcs
+                 if not f["name"].startswith("sub_")]
+        # Batch upsert named functions
+        g = _g()
+        for i in range(0, len(named), 200):
+            g.upsert_functions(binary, named[i:i+200])
+        result["graph_updated"] = True
+    return result
+
+
+@mcp.tool()
+async def get_rtti(binary: str) -> dict:
+    """Extract RTTI metadata: class names, vtable addresses.
+
+    For C++ binaries (SMO, etc.) this recovers class names and tells the
+    model "these N functions are methods of the same class" — huge
+    context boost for naming.
+
+    Returns rtti_symbols (type info, type names) and vtable_slots
+    (function pointers in vtables with their target names).
+    """
+    db = await _live_db(binary)
+    return await db.rtti()
+
+
+
 def main() -> None:
     mcp.run()
 

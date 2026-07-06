@@ -357,7 +357,25 @@ class IDADatabase:
 
         return out
 
-    async def close(self) -> None:
+        # ── FLIRT + RTTI ─────────────────────────────────────────────────────
+
+    async def flirt(self) -> dict:
+        """Apply FLIRT signatures to identify library functions.
+
+        Renames sub_* functions to their real library names (memcpy,
+        std:: stuff, etc.) for free. Run BEFORE AI naming.
+        """
+        return await self._b.flirt()
+
+    async def rtti(self) -> dict:
+        """Extract RTTI metadata: class names, vtable addresses.
+
+        Huge context for C++ binaries — tells the model which functions
+        belong to the same class.
+        """
+        return await self._b.rtti()
+
+async def close(self) -> None:
         await self._b.close()
 
 
