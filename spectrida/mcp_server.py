@@ -512,67 +512,6 @@ async def risk_functions(binary: str, top_n: int = 15) -> dict:
 
 
 @mcp.tool()
-async def populate_binary(
-    binary: str, limit: int | None = None, min_size: int = 0,
-) -> dict:
-    """Re-populate the Neo4j graph for an already-analyzed binary with full
-    control over the naming pass. Use this when the initial analyze_binary
-    only indexed the first N functions (default 2000) and you need everything
-    in the graph. Set limit=None for all functions, min_size=0 to include
-    even tiny thunks/stubs.
-
-    This only runs the demangle + AI-naming pass on the existing .i64 â€” it
-    does NOT re-run the slow parallel analysis.
-
-    Returns immediately with a job_id â€” use poll_analysis() to check status."""
-    from spectrida.core.populate import populate_graph
-
-    job_id = uuid.uuid4().hex[:12]
-    _jobs[job_id] = {
-        "status": "running",
-        "binary": binary,
-        "progress": "demangling + AI naming...",
-        "created": time.time(),
-        "result": None,
-        "error": None,
-    }
-
-    async def _run() -> None:
-        job = _jobs[job_id]
-        try:
-            db = await _live_db(binary)
-
-            async def _on_progress(done: int, total: int) -> None:
-                job["progress"] = f"{done}/{total} functions processed"
-
-            result = await populate_graph(
-                db, _g(), binary,
-                limit=limit,
-                skip=0,
-                min_size=min_size,
-                name_chunk=8,
-                on_progress=_on_progress,
-            )
-            job["status"] = "done"
-            job["result"] = result
-            job["progress"] = f"complete: {result}"
-        except Exception as exc:
-            import traceback
-            tb = traceback.format_exc()
-            job["status"] = "error"
-            job["error"] = f"{type(exc).__name__}: {exc}"
-            job["progress"] = f"failed: {tb[-300:]}"
-
-    asyncio.create_task(_run())
-    return {
-        "job_id": job_id,
-        "status": "started",
-        "binary": binary,
-        "hint": f"call poll_analysis('{job_id}') to check progress",
-    }
-
-
-@mcp.tool()
 async def list_jobs() -> list[dict]:
     """List all background analysis jobs (running, done, or failed).
     Each entry has job_id, status, binary tag, and a progress summary.
