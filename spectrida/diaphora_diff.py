@@ -232,7 +232,7 @@ def port_names(
     result = PortResult(total_matched=len(rows))
 
     for row in rows:
-        ratio = row["ratio"] or 0.0
+        ratio = float(row["ratio"] or 0)
         match = Match(
             address_old=row["address"] or "",
             name_old=row["name"] or "",
@@ -279,8 +279,8 @@ def emit_idc(
     for m in port_result.auto_applied:
         safe = m.name_old.replace('"', '\\"')
         addr = m.address_new
-        if isinstance(addr, str) and addr.startswith("0x"):
-            addr = int(addr, 16)
+        if isinstance(addr, str):
+            addr = int(addr, 16) if addr.startswith("0x") or any(c in addr for c in "abcdefABCDEF") else int(addr)
         lines.append(f'  set_name({addr:#x}, "{safe}", SN_NOWARN);')
 
     lines.append("}")

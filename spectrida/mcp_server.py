@@ -855,25 +855,25 @@ async def populate_binary(
 
 @mcp.tool()
 async def diaphora_export(
-    binary_path: str, out_sqlite: str = "", ida_path: str = "",
+    binary: str, out_sqlite: str = "", ida_dir: str = "",
 ) -> dict:
-    """Phase 1: export a named IDB to Diaphora's SQLite format via IDA batch mode.
+    """Phase 1: export a named IDB to Diaphora's SQLite format via idalib.
 
     Run this AFTER spectrIDA has named a binary (analyze_binary + populate_binary).
     The export carries your names — Diaphora will match functions by structure,
     not by name.
 
-    Requires IDA in batch mode (idat -A -B). If ida_path is empty, auto-detects.
+    Uses spectrida's idalib integration (no idat batch mode needed).
 
     Returns immediately with a job_id — use poll_analysis() to check status.
     Long-running (minutes for large binaries).
     """
-    from spectrida.diaphora_diff import export_db
+    from spectrida.diaphora_headless import headless_export
 
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {
         "status": "running",
-        "binary": binary_path,
+        "binary": binary,
         "progress": "exporting to Diaphora format...",
         "created": time.time(),
         "result": None,
@@ -883,16 +883,23 @@ async def diaphora_export(
     async def _run() -> None:
         job = _jobs[job_id]
         try:
+            # Resolve binary tag to i64 path via graph
+            g = _g()
+            i64_path = g.get_binary_path(binary)
+            if not i64_path:
+                job["status"] = "error"
+                job["error"] = f"no .i64 for '{binary}' -- run analyze_binary first"
+                return
+
             if not out_sqlite:
-                # Default: put next to the binary
                 from pathlib import Path
-                bin_path = Path(binary_path)
-                default_out = str(bin_path.parent / (bin_path.stem + "_diaphora.db"))
+                stem = Path(i64_path).stem
+                default_out = str(Path(i64_path).parent / (stem + "_diaphora.db"))
                 result = await asyncio.to_thread(
-                    export_db, binary_path, default_out, ida_path=ida_path)
+                    headless_export, i64_path, default_out, ida_dir=ida_dir)
             else:
                 result = await asyncio.to_thread(
-                    export_db, binary_path, out_sqlite, ida_path=ida_path)
+                    headless_export, i64_path, out_sqlite, ida_dir=ida_dir)
 
             if "error" in result:
                 job["status"] = "error"
