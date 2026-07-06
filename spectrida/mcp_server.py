@@ -1,17 +1,17 @@
-"""spectrIDA MCP server — lets Claude (or any MCP client) query analyzed
+"""spectrIDA MCP server â€” lets Claude (or any MCP client) query analyzed
 binaries directly: search functions, walk callers/callees, pull pseudocode,
 rename, or kick off a fresh analysis pass on a new binary.
 
 Two tiers of access, by design:
   - Fast/cached: search_functions, get_function, get_callees, get_callers,
-    trace_chain — all hit the Neo4j graph built by scripts/populate_graph.py.
+    trace_chain â€” all hit the Neo4j graph built by scripts/populate_graph.py.
     Cheap, no IDA process involved, safe to call a lot.
-  - Live/authoritative: get_full_pseudocode, rename_function, analyze_binary —
+  - Live/authoritative: get_full_pseudocode, rename_function, analyze_binary â€”
     these open the real .i64 via idalib. Slower, but ground truth (the cached
     graph stores a truncated pseudocode snippet; these don't).
 
 get_function deliberately returns inline {address, name, size} for callees
-AND callers in the same response — that's the whole point. The agent decides
+AND callers in the same response â€” that's the whole point. The agent decides
 whether to chain (call get_function again on a callee) by looking at whether
 it's still sub_* right there in the result, instead of needing a separate
 round trip just to find out there's nothing more to see.
@@ -56,7 +56,7 @@ def _norm_addr(address: str) -> int:
 
 
 def _hexify(d: dict) -> dict:
-    """Graph queries return addr as a raw int (correct for Cypher comparisons) —
+    """Graph queries return addr as a raw int (correct for Cypher comparisons) â€”
     but a bare decimal int is hard for an LLM to read or match against the hex
     addresses it already has. Reformat to hex at the tool boundary only."""
     if "addr" in d and isinstance(d["addr"], int):
@@ -66,13 +66,13 @@ def _hexify(d: dict) -> dict:
 
 async def _live_db(binary: str) -> IDADatabase:
     """Lazily open (and cache) a live IDA handle for `binary`'s registered .i64.
-    Reused across calls in this server's lifetime — reopening a large .i64 is slow.
+    Reused across calls in this server's lifetime â€” reopening a large .i64 is slow.
     Closed explicitly at server shutdown via _close_all_live()."""
     if binary in _live:
         return _live[binary]
     path = _g().get_binary_path(binary)
     if not path:
-        raise ValueError(f"no .i64 registered for binary tag '{binary}' — run populate_graph.py first, "
+        raise ValueError(f"no .i64 registered for binary tag '{binary}' â€” run populate_graph.py first, "
                           f"or call analyze_binary() on a fresh file")
     backend = RealBackend(path)
     await backend.ensure_open()
@@ -90,7 +90,7 @@ async def _close_all_live() -> None:
 async def _heartbeat(ctx: Context | None, message: str, interval_s: float = 12) -> None:
     """Loop sending progress pings while a long single-step operation (e.g.
     one unsharded NSO analysis pass) has no natural sub-progress events of
-    its own — MCP clients use these to know a call is still alive and not
+    its own â€” MCP clients use these to know a call is still alive and not
     apply their own idle/stuck-call timeout. Cancelled by the caller once the
     real work finishes; that cancellation is expected, not an error."""
     if not ctx:
@@ -107,7 +107,7 @@ async def doctor() -> dict:
     """Check the health of every external dependency this server needs
     (llama-server for AI naming, Neo4j for the graph, idalib for IDA access)
     WITHOUT starting anything. Call this first if a tool call fails or
-    behaves oddly — it tells you exactly what's down before you go digging.
+    behaves oddly â€” it tells you exactly what's down before you go digging.
     Use start_all() to actually fix what's reported missing/down."""
     from spectrida.core import services
 
@@ -124,12 +124,12 @@ async def doctor() -> dict:
 async def start_all() -> dict:
     """Start every external dependency that's down but configured
     (llama-server for AI naming, Neo4j for the graph). Safe to call even if
-    some/all are already running — it's a no-op for anything already up.
+    some/all are already running â€” it's a no-op for anything already up.
     idalib doesn't run as a persistent service so there's nothing to start
     for it; analyze_binary/get_full_pseudocode/etc. open it on demand.
 
-    GPU model loads and JVM boots can take 1-5+ minutes, so — like
-    analyze_binary — this returns IMMEDIATELY with a job_id. Use
+    GPU model loads and JVM boots can take 1-5+ minutes, so â€” like
+    analyze_binary â€” this returns IMMEDIATELY with a job_id. Use
     poll_analysis(job_id) to check progress and get the final result once
     status='done'. A service reported not-running AND not-configured in the
     final result means you need to set its path in ~/.spectrida/config.toml's
@@ -162,13 +162,13 @@ async def start_all() -> dict:
 
     asyncio.create_task(_run())
     return {"job_id": job_id, "status": "started",
-            "hint": f"call poll_analysis('{job_id}') to check progress — can take a few minutes"}
+            "hint": f"call poll_analysis('{job_id}') to check progress â€” can take a few minutes"}
 
 
 @mcp.tool()
 async def deindex_binary(binary: str) -> dict:
     """Remove a binary's nodes/edges from the graph (and its Binary registry
-    entry) — use to clear out a bad/stale run before re-populating, or to free
+    entry) â€” use to clear out a bad/stale run before re-populating, or to free
     up Neo4j. Does NOT delete the .i64 file itself."""
     if binary in _live:
         await _live.pop(binary).close()
@@ -191,7 +191,7 @@ def list_binaries() -> list[dict]:
 @mcp.tool()
 def search_functions(binary: str, query: str, limit: int = 20) -> list[dict]:
     """Search for functions by substring in their name within `binary`.
-    Use this to find a starting point — e.g. search_functions('among_us', 'damage')
+    Use this to find a starting point â€” e.g. search_functions('among_us', 'damage')
     to find combat-related code before you know any addresses."""
     return [_hexify(r) for r in _g().search_by_name(binary, query, limit)]
 
@@ -199,8 +199,8 @@ def search_functions(binary: str, query: str, limit: int = 20) -> list[dict]:
 @mcp.tool()
 def get_function(binary: str, address: str) -> dict:
     """Get full info on one function: name, size, a cached pseudocode snippet
-    (may be truncated — call get_full_pseudocode for the complete body),
-    cached disassembly (disasm: [{address, text}, ...] — the instruction-level
+    (may be truncated â€” call get_full_pseudocode for the complete body),
+    cached disassembly (disasm: [{address, text}, ...] â€” the instruction-level
     layer pseudocode can't give you: exact instruction boundaries and operand
     bytes, needed before planning any actual byte/instruction patch), and its
     callees/callers inline as {address, name, size}.
@@ -208,8 +208,8 @@ def get_function(binary: str, address: str) -> dict:
     Use the inline callees/callers to decide whether to chain: if a callee is
     still named sub_* and looks load-bearing, call get_function on it too.
     If everything around it is already meaningfully named, you probably have
-    enough context already — no need to keep digging. A callee with
-    name: null hasn't been indexed yet — call get_full_pseudocode on its
+    enough context already â€” no need to keep digging. A callee with
+    name: null hasn't been indexed yet â€” call get_full_pseudocode on its
     address to look at it live instead of relying on the cached graph.
     """
     addr = _norm_addr(address)
@@ -223,14 +223,14 @@ def get_function(binary: str, address: str) -> dict:
 
 @mcp.tool()
 def get_callees(binary: str, address: str) -> list[dict]:
-    """Just the functions called by `address` — {address, name, size} each.
+    """Just the functions called by `address` â€” {address, name, size} each.
     Lighter than get_function when you only need to see what's downstream."""
     return [_hexify(c) for c in _g().callees(binary, _norm_addr(address))]
 
 
 @mcp.tool()
 def get_callers(binary: str, address: str) -> list[dict]:
-    """Just the functions that call `address` — {address, name, size} each.
+    """Just the functions that call `address` â€” {address, name, size} each.
     Useful for figuring out where/how a function is actually used."""
     return [_hexify(c) for c in _g().callers(binary, _norm_addr(address))]
 
@@ -247,7 +247,7 @@ def trace_chain(binary: str, address: str, depth: int = 2) -> list[dict]:
 async def get_full_pseudocode(binary: str, address: str) -> str:
     """Full, untruncated decompiled pseudocode for one function, fetched live
     from the actual .i64 (not the cached snippet in the graph). Slower than
-    get_function but authoritative — use when the cached snippet cut off
+    get_function but authoritative â€” use when the cached snippet cut off
     mid-function and you need to see the rest."""
     db = await _live_db(binary)
     return await db.decompile(_norm_addr(address))
@@ -257,7 +257,7 @@ async def get_full_pseudocode(binary: str, address: str) -> str:
 async def rename_function(binary: str, address: str, new_name: str) -> dict:
     """Rename a function in the live .i64 AND update the cached graph to
     match, so future queries see the new name too. Use this once you've
-    actually figured out what a function does — it's a real, persisted edit,
+    actually figured out what a function does â€” it's a real, persisted edit,
     not a suggestion."""
     db = await _live_db(binary)
     addr = _norm_addr(address)
@@ -276,21 +276,21 @@ async def rename_function(binary: str, address: str, new_name: str) -> dict:
 @mcp.tool()
 async def emulate_function(binary: str, address: str, binary_path: str = "") -> dict:
     """DYNAMIC analysis: actually RUN one function by CPU emulation (no OS, any
-    arch) and report what happens — the runtime complement to the static graph.
+    arch) and report what happens â€” the runtime complement to the static graph.
 
     Chain-emulates the function (maps the whole image so internal calls resolve,
     stubs out-of-chain calls) with a few fuzzed inputs, then returns an honest
     verdict and writes it onto the graph node (dyn_* props, visible via
     get_function):
-      - candidate_crash : faulted on a wild address → possible bug (verify the
+      - candidate_crash : faulted on a wild address â†’ possible bug (verify the
                           faulting pointer is input-controlled before trusting it)
-      - needs_state     : faulted on an uninitialized global/this → the function
+      - needs_state     : faulted on an uninitialized global/this â†’ the function
                           needs live engine state; emulation can't see it (reason
                           statically, or use live instrumentation on a runnable target)
       - exercised_clean : ran to return
       - inconclusive    : no clean return within the instruction budget
 
-    Fast/synchronous — good for triage. Needs the ORIGINAL binary bytes; pass
+    Fast/synchronous â€” good for triage. Needs the ORIGINAL binary bytes; pass
     binary_path if it isn't auto-resolved from ~/.spectrida or the Binary node.
     Requires the optional 'atlas' extra (pip install "spectrida[atlas]")."""
     from spectrida import dynamic
@@ -303,7 +303,7 @@ async def emulate_function(binary: str, address: str, binary_path: str = "") -> 
         emulate_one, _g(), binary, addr, binary_path or None)
 
     # persist the runtime verdict onto the graph node for the next agent to read.
-    # Use `status` (→ dyn_status) as the canonical verdict field, consistent with
+    # Use `status` (â†’ dyn_status) as the canonical verdict field, consistent with
     # hunt_crashes and the dynamic_overview / risk_functions queries.
     facts = {"status": result["verdict"], "tool": "atlas-emulate"}
     for k in ("note", "reachable", "blocks", "stubbed_calls", "arch"):
@@ -326,12 +326,12 @@ async def hunt_crashes(binary: str, address: str, seeds_dir: str = "",
     """DYNAMIC: fuzz ONE function for crashes and record the reproducing inputs.
 
     Emulate-fuzzes the function with many mutated inputs, seeded from `seeds_dir`
-    when provided — this is the agent↔Atlas seam: you (the agent) read the
+    when provided â€” this is the agentâ†”Atlas seam: you (the agent) read the
     function's format from its pseudocode, fetch/generate valid sample inputs
     (e.g. real PNG/TTF/save files), drop them in a folder, and pass its path.
     Good seeds start the fuzzer INSIDE the parser and dramatically improve reach.
 
-    Long-running → returns a job_id immediately; poll with poll_analysis(). On
+    Long-running â†’ returns a job_id immediately; poll with poll_analysis(). On
     completion, annotates each crash (dyn_crashes, dyn_crash_input) onto the graph
     node. Requires the optional 'atlas' extra (pip install "spectrida[atlas]")."""
     from spectrida import dynamic
@@ -381,7 +381,7 @@ async def hunt_crashes(binary: str, address: str, seeds_dir: str = "",
 
     asyncio.create_task(_run())
     return {"job_id": job_id, "status": "started", "binary": binary,
-            "hint": f"call poll_analysis('{job_id}') — fuzzing runs for a bit"}
+            "hint": f"call poll_analysis('{job_id}') â€” fuzzing runs for a bit"}
 
 
 @mcp.tool()
@@ -392,10 +392,10 @@ async def learn_vm(steps: int = 500, device: str = "cpu") -> dict:
     when it hits a learnable-but-underfit wall.
 
     Unlike the per-function tools this explores a whole VM (not one binary), so it
-    returns LEARNING statistics — prediction-error trend, held-out generalization,
-    behavior coverage, growth events, honest per-family competence — rather than
+    returns LEARNING statistics â€” prediction-error trend, held-out generalization,
+    behavior coverage, growth events, honest per-family competence â€” rather than
     graph annotations. Heavy: provisions a WSL2 distro, ideally uses a GPU
-    (device='cuda'). Long-running → returns a job_id; poll with poll_analysis().
+    (device='cuda'). Long-running â†’ returns a job_id; poll with poll_analysis().
     Requires the optional 'atlas' extra (pip install "spectrida[atlas]")."""
     from spectrida import dynamic
     dynamic.require()
@@ -426,20 +426,20 @@ async def learn_vm(steps: int = 500, device: str = "cpu") -> dict:
 
     asyncio.create_task(_run())
     return {"job_id": job_id, "status": "started", "binary": "(vm)",
-            "hint": f"call poll_analysis('{job_id}') — VM learning runs for a while"}
+            "hint": f"call poll_analysis('{job_id}') â€” VM learning runs for a while"}
 
 
 @mcp.tool()
 async def live_trace(binary: str, addresses: list[str], binary_path: str = "",
                      seconds: int = 3) -> dict:
     """DYNAMIC (live): attach to the RUNNING target with Frida and capture what
-    the given functions actually do — real arguments, return values, call counts.
+    the given functions actually do â€” real arguments, return values, call counts.
 
     Use this for functions that emulate_function reports as `needs_state`: the
     live process HAS the globals/heap/objects emulation can't build, so the
     function runs for real. Writes dyn_live_* facts onto each hooked node.
 
-    ONLY for targets that actually run on THIS machine (native PE/ELF) — not
+    ONLY for targets that actually run on THIS machine (native PE/ELF) â€” not
     Switch NSO or other non-runnable images. Spawns/executes the target, so use
     on binaries you trust (sandbox untrusted ones). Requires the optional 'atlas'
     extra (pip install "spectrida[atlas]")."""
@@ -473,7 +473,7 @@ async def dynamic_overview(binary: str) -> dict:
     """Summary of DYNAMIC (runtime) findings for a binary: how many functions have
     been emulated/fuzzed/traced, how many crash (dyn_status='candidate_crash'),
     how many need live state, and the top crash-bearing functions. Reads the dyn_*
-    annotations written by emulate_function / hunt_crashes / live_trace — the
+    annotations written by emulate_function / hunt_crashes / live_trace â€” the
     runtime layer on top of the static graph."""
     g = _g()
     with g.driver.session() as s:
@@ -495,7 +495,7 @@ async def dynamic_overview(binary: str) -> dict:
 
 @mcp.tool()
 async def risk_functions(binary: str, top_n: int = 15) -> dict:
-    """Functions ranked by DYNAMIC risk — those Atlas found to crash or reach a
+    """Functions ranked by DYNAMIC risk â€” those Atlas found to crash or reach a
     fault, most crash sites first. This is the runtime-evidence answer (unlike a
     purely static heuristic): a function is here because it *actually* faulted
     under emulation/fuzzing. Run emulate_function / hunt_crashes first to populate."""
@@ -521,10 +521,10 @@ async def populate_binary(
     in the graph. Set limit=None for all functions, min_size=0 to include
     even tiny thunks/stubs.
 
-    This only runs the demangle + AI-naming pass on the existing .i64 — it
+    This only runs the demangle + AI-naming pass on the existing .i64 â€” it
     does NOT re-run the slow parallel analysis.
 
-    Returns immediately with a job_id — use poll_analysis() to check status."""
+    Returns immediately with a job_id â€” use poll_analysis() to check status."""
     from spectrida.core.populate import populate_graph
 
     job_id = uuid.uuid4().hex[:12]
@@ -594,10 +594,10 @@ async def poll_analysis(job_id: str) -> dict:
     """Check the status of a background analysis job kicked off by
     analyze_binary. Returns the full result if done, or current progress
     if still running. Poll this every few seconds until status is 'done'
-    or 'error' — the analysis can take minutes for large binaries."""
+    or 'error' â€” the analysis can take minutes for large binaries."""
     job = _jobs.get(job_id)
     if not job:
-        return {"error": f"no job '{job_id}' — it may have been cleaned up or never existed"}
+        return {"error": f"no job '{job_id}' â€” it may have been cleaned up or never existed"}
     if job["status"] == "running":
         return {"job_id": job_id, "status": "running", "progress": job.get("progress", ""),
                 "binary": job.get("binary", "?")}
@@ -614,15 +614,15 @@ async def analyze_binary(
     populate_min_size: int = 20, ctx: Context | None = None,
 ) -> dict:
     """Kick off spectrIDA's parallel analysis pipeline on a fresh binary
-    (DLL/EXE/NSO/...) — this can take MINUTES for large binaries, so it
+    (DLL/EXE/NSO/...) â€” this can take MINUTES for large binaries, so it
     returns IMMEDIATELY with a job_id. Use poll_analysis(job_id) to check
     progress and get the final result once status='done'.
 
-    The pipeline: discover code segments → density-balanced sharding →
-    parallel idalib workers → merge into one .i64 → (optionally) populate
+    The pipeline: discover code segments â†’ density-balanced sharding â†’
+    parallel idalib workers â†’ merge into one .i64 â†’ (optionally) populate
     the Neo4j graph with AI-named functions.
 
-    populate_limit caps how many functions get the AI-naming pass — raise
+    populate_limit caps how many functions get the AI-naming pass â€” raise
     it for a fuller pass, or set populate=False to skip naming entirely.
     Call this ONCE per binary, then poll for the result."""
     from spectrida.core.pipeline import run_analysis
@@ -640,7 +640,7 @@ async def analyze_binary(
     async def _run() -> None:
         job = _jobs[job_id]
         try:
-            # ── phase 1: parallel analysis ──
+            # â”€â”€ phase 1: parallel analysis â”€â”€
             job["progress"] = "discovering code segments..."
             result = await run_analysis(path, workers, on_line=None)
 
@@ -665,7 +665,7 @@ async def analyze_binary(
                 "binary": binary,
             }
 
-            # ── phase 2: populate graph ──
+            # â”€â”€ phase 2: populate graph â”€â”€
             if populate:
                 from spectrida.core.populate import populate_graph
 
@@ -700,7 +700,7 @@ async def analyze_binary(
         "job_id": job_id,
         "status": "started",
         "binary": binary,
-        "hint": "call poll_analysis('" + job_id + "') to check progress — this will take minutes",
+        "hint": "call poll_analysis('" + job_id + "') to check progress â€” this will take minutes",
     }
 
 
@@ -713,7 +713,7 @@ async def get_context(binary: str, address: str, depth: int = 2,
     string literals referenced in the pseudocode, and distinctive constants.
     This is the raw context that feeds the improved naming prompt.
 
-    Use this to understand WHY a function would be named a certain way —
+    Use this to understand WHY a function would be named a certain way â€”
     the model sees this neighborhood when naming.
     """
     from spectrida.context import gather_context, format_context_block
@@ -850,6 +850,118 @@ async def populate_binary(
         "binary": binary,
         "hint": f"call poll_analysis('{job_id}') to check progress",
     }
+
+
+
+@mcp.tool()
+async def diaphora_export(
+    binary_path: str, out_sqlite: str = "", ida_path: str = "",
+) -> dict:
+    """Phase 1: export a named IDB to Diaphora's SQLite format via IDA batch mode.
+
+    Run this AFTER spectrIDA has named a binary (analyze_binary + populate_binary).
+    The export carries your names — Diaphora will match functions by structure,
+    not by name.
+
+    Requires IDA in batch mode (idat -A -B). If ida_path is empty, auto-detects.
+
+    Returns immediately with a job_id — use poll_analysis() to check status.
+    Long-running (minutes for large binaries).
+    """
+    from spectrida.diaphora_diff import export_db
+
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {
+        "status": "running",
+        "binary": binary_path,
+        "progress": "exporting to Diaphora format...",
+        "created": time.time(),
+        "result": None,
+        "error": None,
+    }
+
+    async def _run() -> None:
+        job = _jobs[job_id]
+        try:
+            if not out_sqlite:
+                # Default: put next to the binary
+                from pathlib import Path
+                bin_path = Path(binary_path)
+                default_out = str(bin_path.parent / (bin_path.stem + "_diaphora.db"))
+                result = await asyncio.to_thread(
+                    export_db, binary_path, default_out, ida_path=ida_path)
+            else:
+                result = await asyncio.to_thread(
+                    export_db, binary_path, out_sqlite, ida_path=ida_path)
+
+            if "error" in result:
+                job["status"] = "error"
+                job["error"] = result["error"]
+            else:
+                job["status"] = "done"
+                job["result"] = result
+                job["progress"] = f"exported in {result.get('elapsed', 0):.1f}s"
+        except Exception as exc:
+            import traceback
+            job["status"] = "error"
+            job["error"] = f"{type(exc).__name__}: {exc}"
+            job["progress"] = f"failed: {traceback.format_exc()[-300:]}"
+
+    asyncio.create_task(_run())
+    return {
+        "job_id": job_id,
+        "status": "started",
+        "hint": f"call poll_analysis('{job_id}') — export takes minutes",
+    }
+
+
+@mcp.tool()
+async def diaphora_port_names(
+    old_sqlite: str, new_sqlite: str,
+    auto_ratio: float = 0.95, hint_ratio: float = 0.80,
+    out_dir: str = "",
+) -> dict:
+    """Phase 2: diff two Diaphora exports and port names across versions.
+
+    Given an old NAMED export and a new UNNAMED export, Diaphora finds matching
+    functions by structure. This tool:
+
+      1. Runs the diff headlessly (pure Python, no IDA needed)
+      2. Gates matches by ratio:
+         >= 0.95 → auto-apply (writes .idc apply-script)
+         0.80–0.95 → hints (JSON for review / model context)
+         < 0.80 → discarded
+      3. Returns match stats + paths to generated files
+
+    This is the headline feature — name v1 once, port to every update.
+    """
+    from spectrida.diaphora_diff import port_names_full
+
+    result = await asyncio.to_thread(
+        port_names_full, old_sqlite, new_sqlite, out_dir,
+        auto_ratio=auto_ratio, hint_ratio=hint_ratio)
+
+    if "error" in result:
+        return {"error": result["error"]}
+
+    return result
+
+
+@mcp.tool()
+async def diaphora_diff(
+    old_sqlite: str, new_sqlite: str, out_diaphora: str = "",
+) -> dict:
+    """Raw Diaphora diff — returns the diff results without gating.
+
+    Use this when you want to inspect all matches (including low-confidence)
+    before deciding on thresholds. For the gated version, use diaphora_port_names.
+    """
+    from spectrida.diaphora_diff import diff_db
+
+    result = await asyncio.to_thread(
+        diff_db, old_sqlite, new_sqlite, out_diaphora)
+    return result
+
 
 
 def main() -> None:
