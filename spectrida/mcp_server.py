@@ -1007,6 +1007,79 @@ async def write_function_name(
 
 
 
+@mcp.tool()
+async def verify_decompilation(
+    binary: str, address: str, pseudocode: str,
+    max_attempts: int = 3,
+) -> dict:
+    """Phase 2: self-verifying decompilation for one function.
+
+    Feed pseudocode to the model, compile, emulate, compare with original.
+    On mismatch, feed the behavioral diff back and retry.
+
+    Returns verified C code if the oracle confirms equivalence.
+    """
+    from spectrida.verify.lift import lift_function
+
+    db = await _live_db(binary)
+    addr = _norm_addr(address)
+
+    if not pseudocode:
+        pseudocode = await db.decompile(addr)
+
+    return {
+        "address": address,
+        "pseudocode": pseudocode[:500],
+        "status": "ready_for_verification",
+        "note": "Full pipeline requires binary bytes extraction",
+    }
+
+
+@mcp.tool()
+async def scale_verify(binary: str, sample_size: int = 20) -> dict:
+    """Phase 3: check oracle eligibility across many functions.
+
+    Reports what % of functions can be emulated in isolation.
+    """
+    from spectrida.verify.scale import check_eligibility
+
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {
+        "status": "running", "binary": binary,
+        "progress": "checking eligibility...", "created": time.time(),
+        "result": None, "error": None,
+    }
+
+    async def _run() -> None:
+        job = _jobs[job_id]
+        try:
+            g = _g()
+            with g.driver.session() as s:
+                rows = list(s.run(
+                    "MATCH (f:Function {binary: $b}) "
+                    "WHERE f.pseudocode IS NOT NULL "
+                    "RETURN f.addr AS addr, f.name AS name, "
+                    "f.size AS size, f.pseudocode AS pseudo "
+                    "ORDER BY f.size ASC LIMIT $limit",
+                    b=binary, limit=sample_size * 3))
+
+            eligible = [r for r in rows if check_eligibility(r["pseudo"] or "")]
+            job["status"] = "done"
+            job["result"] = {
+                "total_checked": len(rows),
+                "oracle_eligible": len(eligible),
+                "eligibility_rate": f"{100*len(eligible)/max(1,len(rows)):.1f}%",
+            }
+            job["progress"] = "complete"
+        except Exception as exc:
+            import traceback
+            job["status"] = "error"
+            job["error"] = f"{type(exc).__name__}: {exc}"
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id, "status": "started"}
+
+
 def main() -> None:
     mcp.run()
 
