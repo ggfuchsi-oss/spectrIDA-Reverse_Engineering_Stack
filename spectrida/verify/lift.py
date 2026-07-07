@@ -128,6 +128,62 @@ async def _query_model(
         return resp.json().get("content", "").strip()
 
 
+NL = chr(10)
+
+def _extract_struct_context(pseudocode: str) -> str:
+    """Extract struct definitions from pseudocode for the model prompt."""
+    import re
+    
+    structs = []
+    
+    # Find struct field accesses in both styles:
+    # Style 1: *((TYPE *)this + offset)
+    # Style 2: ptr->field_name
+    type_offsets = {}
+    field_names = {}
+    
+    # Style 1: *((TYPE *)this + offset)
+    for m in re.finditer(r'\*\(\((\w+)\s*\*\)\s*\((\w+)\s*\+\s*(\d+)\)\)', pseudocode):
+        field_type = m.group(1)
+        offset = int(m.group(3))
+        if field_type not in type_offsets:
+            type_offsets[field_type] = []
+        type_offsets[field_type].append(offset)
+    
+    # Style 2: ptr->field_name (infer offset from order)
+    for m in re.finditer(r'(\w+)->(\w+)', pseudocode):
+        ptr_name = m.group(1)
+        field_name = m.group(2)
+        if ptr_name not in field_names:
+            field_names[ptr_name] = []
+        field_names[ptr_name].append(field_name)
+    
+    # Build struct definitions from type-offset pairs
+    for field_type, offsets in type_offsets.items():
+        offsets.sort()
+        struct_name = "GameData"  # Generic name
+        fields = []
+        for i, offset in enumerate(offsets):
+            field_name = f"field_{offset}"
+            fields.append(f"    {field_type} {field_name};")
+        
+        struct_def = "typedef struct {" + NL + NL.join(fields) + NL + "} " + struct_name + ";"
+        structs.append(struct_def)
+    
+    # Build struct definitions from ptr->field patterns
+    for ptr_name, fields in field_names.items():
+        if len(fields) >= 2:  # Only if we have multiple fields
+            struct_name = ptr_name.capitalize() + "Data"
+            struct_fields = []
+            for i, field_name in enumerate(fields):
+                struct_fields.append(f"    int {field_name};")  # Assume int for now
+            
+            struct_def = "typedef struct {" + NL + NL.join(struct_fields) + NL + "} " + struct_name + ";"
+            structs.append(struct_def)
+    
+    return NL.join(structs) if structs else ""
+
+
 def _extract_c_code(text: str) -> str:
     """Extract C code from model response (strip markdown, comments, etc.)."""
     # Remove markdown code blocks
@@ -216,7 +272,11 @@ async def lift_function(
                     previous_c=previous_c,
                 )
             else:
-                user_msg = LIFT_PROMPT_TEMPLATE.format(pseudocode=pseudocode)
+                struct_ctx = _extract_struct_context(pseudocode)
+            user_msg = LIFT_PROMPT_TEMPLATE.format(
+                struct_context=struct_ctx,
+                pseudocode=pseudocode,
+            )
 
             # 2. Query model
             try:
