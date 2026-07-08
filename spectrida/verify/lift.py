@@ -405,7 +405,35 @@ async def lift_function(
                 )
             else:
                 struct_ctx = _extract_struct_context(pseudocode)
+            
+            # Extract callee prototypes from pseudocode and graph
+            import re
+            callees = set()
+            for m in re.finditer(r'([A-Z]\w*(?:::[A-Z]\w*)*)\s*\(', pseudocode):
+                callees.add(m.group(1))
+            
+            # Get actual function signatures from the graph
+            callee_protos = []
+            for c in sorted(callees):
+                # Check if we have the actual signature
+                try:
+                    with g.driver.session() as s:
+                        row = s.run("MATCH (f:Function {binary: 'main.nso'}) WHERE f.name CONTAINS  RETURN f.pseudocode AS pseudo LIMIT 1", name=c).single()
+                        if row and row['pseudo']:
+                            # Extract just the function signature
+                            sig_match = re.search(r'(\w+\s+\w+\([^)]+\))', row['pseudo'])
+                            if sig_match:
+                                callee_protos.append(sig_match.group(1) + ';')
+                                continue
+                except Exception:
+                    pass
+                # Fallback to generic stub
+                callee_protos.append(f'long long {c.replace("::", "_")}(long long* args);')
+            
+            callee_protos = chr(10).join(callee_protos)
+            
             user_msg = LIFT_PROMPT_TEMPLATE.format(
+                callee_prototypes=callee_protos,
                 struct_context=struct_ctx,
                 pseudocode=pseudocode,
             )
