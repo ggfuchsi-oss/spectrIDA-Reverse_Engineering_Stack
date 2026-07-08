@@ -78,15 +78,19 @@ async def _query_model(http, ollama_url, system, user_msg, *, ollama_model=''):
         return resp.json().get('content', '').strip()
 
 def _extract_c_code(text):
-    text = re.sub(r'\s*$', '', text, flags=re.MULTILINE)
+    # Strip markdown code blocks
+    text = re.sub(r"\s*$", "", text, flags=re.MULTILINE)
+    # Strip leading/trailing whitespace
     text = text.strip()
+    # Find the function definition
     lines = text.split(NL)
     start = 0
     for i, line in enumerate(lines):
-        if re.match(r'^\s*(typedef|struct|static|void|int|long|char|unsigned|float|double|__int|const|inline)', line):
+        if re.match(r"^\s*(typedef|struct|static|void|int|long|char|unsigned|float|double|__int|const|inline)", line):
             start = i
             break
     return NL.join(lines[start:]).strip()
+
 
 async def lift_function(pseudocode, original_bytes, func_name='', *, http=None, ollama_url='', ollama_model='', max_attempts=3, args=None):
     import httpx as _httpx
