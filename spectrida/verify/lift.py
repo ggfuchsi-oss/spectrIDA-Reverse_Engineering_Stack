@@ -23,6 +23,8 @@ from spectrida.verify.oracle import (
     compare_emulations,
     extract_function_bytes,
 )
+from spectrida.verify.capture_replay import capture_external_calls, replay_with_stubs, compare_with_replay
+from spectrida.verify.symbols import generate_symbol_stubs_from_pseudocode
 
 
 # ── Types ────────────────────────────────────────────────────────────────────
@@ -188,7 +190,13 @@ def _normalize_types(code: str) -> str:
     """Normalize C++ pseudocode for GCC C++ compilation."""
     import re
 
-    # Step 1: Rename 'this' to 'self' (reserved in C++)
+    # Step 1: Strip namespaces and casts
+    # Remove (Type *) casts — replace with (void *)
+    code = re.sub(r'\(\w+\s*\*\s*\)', '0', code)
+    # Strip remaining namespaces (al::, sead::, etc.)
+    code = re.sub(r"\w+::", "", code)
+    
+    # Step 2: Rename 'this' to 'self' (reserved in C++)
     code = code.replace("this", "self")
 
     # Step 2: Replace void* parameter with ThisStruct*
@@ -197,7 +205,7 @@ def _normalize_types(code: str) -> str:
 
 
 
-    # Step 4: Replace MSVC types with GCC equivalents
+    # Step 7: Replace MSVC types with GCC equivalents
     replacements = [
         ("__int64", "long long"),
         ("__int32", "int"),
@@ -209,16 +217,25 @@ def _normalize_types(code: str) -> str:
         ("_QWORD", "unsigned long long"),
         ("__fastcall", ""),
         ("__cdecl", ""),
+        ("int64_t", "long long"),
+        ("uint64_t", "unsigned long long"),
+        ("int32_t", "int"),
+        ("uint32_t", "unsigned int"),
+        ("int16_t", "short"),
+        ("uint16_t", "unsigned short"),
+        ("int8_t", "char"),
+        ("uint8_t", "unsigned char"),
+        ("size_t", "unsigned long long"),
     ]
     for old, new in replacements:
         code = code.replace(old, new)
 
-    # Step 5: Replace address references with NULL
+    # Step 7: Replace address references with NULL
     # &off_XXXX, &unk_XXXX, etc. are binary-specific addresses
-    code = re.sub(r'&off_[0-9a-fA-F]+', '0', code)
-    code = re.sub(r'&unk_[0-9a-fA-F]+', '0', code)
+    code = re.sub(r'&?off_[0-9a-fA-F]+', '0', code)
+    code = re.sub(r'&?unk_[0-9a-fA-F]+', '0', code)
     
-    # Step 6: Replace unknown struct types with ThisStruct*
+    # Step 7: Replace unknown struct types with ThisStruct*
     known_types = {"int", "long", "char", "void", "float", "double", "unsigned",
                    "signed", "short", "struct", "union", "enum", "const", "static",
                    "extern", "volatile", "inline", "register", "auto", "typedef",
@@ -231,12 +248,26 @@ def _normalize_types(code: str) -> str:
             return match.group(0)
         return f"ThisStruct* {match.group(2)}"
 
-    code = re.sub(r"(\w+)\s+\*(\w+)", replace_unknown_type, code)
+    code = re.sub(r"(\w+)\s*\*\s*(\w+)", replace_unknown_type, code)
 
-    # Step 6: Add struct definition before the function
+    # Step 7: Add struct definition before the function
     struct_def = "typedef struct { unsigned long long vtable, m_archive, m_name, m_fileSize, m_dataSize, m_offset, m_entryIndex, m_childCount, m_childList0, m_childList1, m_childList2; unsigned int m_flags, m_entryType; } ThisStruct;" + chr(10) + chr(10)
     code = struct_def + code
 
+    # Generate stubs from pseudocode
+    from spectrida.verify.symbols import generate_symbol_stubs_from_pseudocode
+    symbol_stubs = generate_symbol_stubs_from_pseudocode(code)
+    
+    # Add common library function stubs
+    stubs = """// Common library stubs
+static char _malloc_buf[4096];
+#define malloc(s) ((long long)_malloc_buf)
+#define operator_new(s) ((long long)0)
+#define free(p) ((void)0)
+int printf(const char* fmt, ...) { return 0; }
+"""
+    code = stubs + symbol_stubs + code
+    
     return code
 
 
@@ -362,7 +393,14 @@ async def lift_function(
 
             attempt.compiled = True
 
-            # 4. Extract bytes
+            # 4. Capture external calls from original
+            externals = find_external_calls(pseudocode)
+            if externals:
+                capture_result = capture_external_calls(
+                    original_bytes,
+                    args=args if args else [0, 0, 0, 0],
+                )
+                # 5. Extract bytes from compiled
             extract_result = extract_function_bytes(
                 _dll, func_name
             )
