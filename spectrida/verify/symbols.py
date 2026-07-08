@@ -9,6 +9,44 @@ from __future__ import annotations
 import re
 
 
+def load_symbol_database(path: str) -> dict:
+    """Load a symbol database from a JSON file."""
+    with open(path, 'r') as f:
+        return json.load(f)
+
+
+def generate_stubs_from_database(
+    symbols: dict,
+    externals: set[str],
+) -> str:
+    """Generate stub declarations using the symbol database."""
+    stubs = []
+    
+    for sym in sorted(externals):
+        # Clean up namespace
+        clean_name = sym.replace('::', '_')
+        
+        # Check if we have info about this symbol
+        if sym in symbols:
+            info = symbols[sym]
+            namespace = info.get('namespace', '')
+            func_name = info.get('func_name', sym)
+            size = info.get('size', 0)
+            
+            # Generate stub based on size
+            if size > 0:
+                stubs.append(f'// {sym} (size: {size} bytes)')
+            else:
+                stubs.append(f'// {sym}')
+            stubs.append(f'long long {clean_name}(long long* args) {{ return 0; }}')
+        else:
+            # Unknown symbol - generate generic stub
+            stubs.append(f'// Stub for {sym}')
+            stubs.append(f'long long {clean_name}(long long* args) {{ return 0; }}')
+    
+    return chr(10).join(stubs)
+
+
 def extract_symbols_from_pseudocode(pseudocode: str) -> set[str]:
     """Extract all external function calls from pseudocode."""
     externals = set()
@@ -43,8 +81,8 @@ def generate_stubs(symbols: set[str], known_types: set[str] | None = None) -> st
         # Clean up namespace
         clean_name = sym.replace('::', '_')
         
-        # Skip if already a known type
-        if sym in known_types:
+        # Skip if already a known type, ThisStruct, or operator_new (has macro)
+        if sym in known_types or sym == 'ThisStruct' or sym == 'operator_new':
             continue
         
         # Generate stub based on naming patterns

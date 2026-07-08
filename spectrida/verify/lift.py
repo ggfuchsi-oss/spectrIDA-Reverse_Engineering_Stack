@@ -260,11 +260,56 @@ def _normalize_types(code: str) -> str:
     
     # Add common library function stubs
     stubs = """// Common library stubs
+    
+// Macros for allocation
 static char _malloc_buf[4096];
-#define malloc(s) ((long long)_malloc_buf)
-#define operator_new(s) ((long long)0)
+
+#define operator_new(s) ((long long)_malloc_buf)
 #define free(p) ((void)0)
 int printf(const char* fmt, ...) { return 0; }
+
+// Stub for sead::SafeStringBase
+static long long _safe_string_buf[100];
+#define sead_SafeStringBase_cNullChar ((long long)_safe_string_buf)
+
+// Stub for sead::FileDevice
+long long sead_FileDevice_tryIsExistFile(long long* args) { return 0; }
+
+// Stub for sead::Heap
+long long sead_Heap_alloc(long long* args) { return 0; }
+
+// Stub for al:: functions
+long long al_setNerve(long long* args) { return 0; }
+long long al_isNerve(long long* args) { return 0; }
+long long al_forceSetStopCalcAndDraw(long long* args) { return 0; }
+long long al_scaleVelocity(long long* args) { return 0; }
+long long al_getJointMtxPtr(long long* args) { return 0; }
+long long al_disconnectMtxConnector(long long* args) { return 0; }
+long long al_setQuat(long long* args) { return 0; }
+long long al_getCurrentKeyPlacementInfo(long long* args) { return 0; }
+long long al_getNextKeyTrans(long long* args) { return 0; }
+long long al_invalidateColliderRobustCheck(long long* args) { return 0; }
+
+// Stub for rs:: functions
+long long rs_isHoldHackJump(long long* args) { return 0; }
+
+// Stub for nn:: functions
+long long nn_nex_PRUDPEndPoint_ServiceIncomingP(long long* args) { return 0; }
+long long nn_nex_PRUDPStream_ReceiveIncomingPac(long long* args) { return 0; }
+long long nn_nex_NATTraversalEngine_SendProbeRe(long long* args) { return 0; }
+long long nn_nex_NATTraversalEngine_StopProbes(long long* args) { return 0; }
+long long nn_nex_ConnectionOrientedSocketManager(long long* args) { return 0; }
+
+// Stub for Concurrency:: functions
+long long Concurrency_missing_wait(long long* args) { return 0; }
+
+// Stub for agl:: functions
+long long agl_pfx_Sky_setUpShader(long long* args) { return 0; }
+long long agl_pfx_Bloom_draw(long long* args) { return 0; }
+
+// Stub for al::GraphicsQualityParam
+long long al_GraphicsQualityParam_GraphicsQualityParam(long long* args) { return 0; }
+#define free(p) ((void)0)
 """
     code = stubs + symbol_stubs + code
     
