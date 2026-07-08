@@ -184,6 +184,54 @@ def _extract_struct_context(pseudocode: str) -> str:
     return NL.join(structs) if structs else ""
 
 
+def _normalize_types(code: str) -> str:
+    """Add a dummy struct definition for this-> access."""
+    # Add struct definition before the function
+    struct_def = 'typedef struct { unsigned long long fields[10]; unsigned int flags; } this_struct;' + chr(10) + chr(10)
+
+    code = struct_def + code
+    """Normalize MSVC types to GCC-compatible types."""
+    # Replace MSVC types with GCC equivalents
+    replacements = [
+        ('__int64', 'long long'),
+        ('__int32', 'int'),
+        ('__int16', 'short'),
+        ('__int8', 'char'),
+        ('_BYTE', 'unsigned char'),
+        ('_WORD', 'unsigned short'),
+        ('_DWORD', 'unsigned int'),
+        ('_QWORD', 'unsigned long long'),
+        ('__fastcall', ''),
+        ('__cdecl', ''),
+    ]
+    for old, new in replacements:
+        code = code.replace(old, new)
+    
+    # Replace unknown struct types with void*
+    # Find type names that aren't C keywords or common types
+    import re
+    known_types = {'int', 'long', 'char', 'void', 'float', 'double', 'unsigned',
+                   'signed', 'short', 'struct', 'union', 'enum', 'const', 'static',
+                   'extern', 'volatile', 'inline', 'register', 'auto', 'typedef',
+                   'if', 'else', 'while', 'for', 'do', 'switch', 'case', 'break',
+                   'continue', 'return', 'goto', 'sizeof', 'NULL', 'true', 'false'}
+    
+    def replace_unknown_type(match):
+        type_name = match.group(1)
+        if type_name.lower() in known_types or type_name.startswith('uint') or type_name.startswith('int'):
+            return match.group(0)  # Keep known types
+        return f'void* {match.group(2)}'  # Replace unknown with void*
+    
+    # Find function parameters with unknown types
+    code = re.sub(r'(\w+)\s+\*(\w+)', replace_unknown_type, code)
+    
+    # Convert this-> to struct access
+    # this->field becomes this_struct.field
+    code = code.replace('this->', 'this_struct.')
+    
+    return code
+
+
 def _extract_c_code(text: str) -> str:
     """Extract C code from model response (strip markdown, comments, etc.)."""
     # Remove markdown code blocks
@@ -284,7 +332,7 @@ async def lift_function(
                     http, ollama_url, LIFT_SYSTEM, user_msg,
                     ollama_model=ollama_model,
                 )
-                c_code = _extract_c_code(raw_response)
+                c_code = _normalize_types(_extract_c_code(raw_response))
                 attempt.c_code = c_code
             except Exception as e:
                 attempt.compile_error = f"model query failed: {e}"
