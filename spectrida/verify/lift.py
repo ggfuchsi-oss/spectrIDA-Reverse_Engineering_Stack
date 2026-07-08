@@ -213,7 +213,12 @@ def _normalize_types(code: str) -> str:
     for old, new in replacements:
         code = code.replace(old, new)
 
-    # Step 5: Replace unknown struct types with ThisStruct*
+    # Step 5: Replace address references with NULL
+    # &off_XXXX, &unk_XXXX, etc. are binary-specific addresses
+    code = re.sub(r'&off_[0-9a-fA-F]+', '0', code)
+    code = re.sub(r'&unk_[0-9a-fA-F]+', '0', code)
+    
+    # Step 6: Replace unknown struct types with ThisStruct*
     known_types = {"int", "long", "char", "void", "float", "double", "unsigned",
                    "signed", "short", "struct", "union", "enum", "const", "static",
                    "extern", "volatile", "inline", "register", "auto", "typedef",
