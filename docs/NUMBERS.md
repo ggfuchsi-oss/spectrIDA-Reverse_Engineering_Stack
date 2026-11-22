@@ -1,4 +1,4 @@
-# 📊 Numbers — and how we got honest ones
+# Numbers — and how we got honest ones
 
 | task | time |
 |------|------|

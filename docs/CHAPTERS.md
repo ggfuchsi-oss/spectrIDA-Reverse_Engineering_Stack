@@ -1,4 +1,4 @@
-# 👻 The chapters, in full
+# The chapters, in full
 
 ## Chapter 2 — the ghost learns to talk back
 

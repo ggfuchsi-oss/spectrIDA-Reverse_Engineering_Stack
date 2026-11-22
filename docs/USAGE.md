@@ -1,4 +1,4 @@
-# 🛠 Using spectrIDA
+# Using spectrIDA
 
 Everything the README skips: every command, every key, the Python API, config, and the model.
 

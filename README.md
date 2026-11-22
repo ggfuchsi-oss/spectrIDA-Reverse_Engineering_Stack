@@ -23,7 +23,7 @@ And a ghost that runs the code to see what it really does.
   ████████████████████████████░░░░  89%  ~4s remaining
 ```
 
-## ⚡ Why
+## Why
 
 IDA's auto-analysis is single-threaded. spectrIDA splits the binary into shards, runs them in
 parallel through idalib, and merges them back into one `.i64`.
@@ -38,7 +38,7 @@ Then a fine-tuned 8B model names the `sub_*` leftovers, so 148,000 nameless func
 
 <sub>Measured on a Ryzen 7 5800X3D + RTX 4070. Full tables and the bug horror stories: [docs/NUMBERS.md](docs/NUMBERS.md).</sub>
 
-## 🚀 Try it
+## Try it
 
 ```bash
 pip install spectrida
@@ -53,7 +53,7 @@ spectrida onboard                                    # finds your IDA, sets ever
 spectrida analyze GameAssembly.dll --workers 16
 ```
 
-## 👻 Three chapters
+## Three chapters
 
 | | what it does | how |
 |---|---|---|
@@ -63,7 +63,7 @@ spectrida analyze GameAssembly.dll --workers 16
 
 Works on **PE**, **ELF** and Switch **NSO**. Adding a format is one file.
 
-## 📚 More
+## More
 
 - [docs/USAGE.md](docs/USAGE.md): every command, the keys, the Python API, config, the model
 - [docs/CHAPTERS.md](docs/CHAPTERS.md): chapters 2 and 3 in full, and who this is for

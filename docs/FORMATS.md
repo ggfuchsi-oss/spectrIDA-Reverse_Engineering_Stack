@@ -1,4 +1,4 @@
-# 🧩 Adding a new binary format
+# Adding a new binary format
 
 Format support is a plugin system, not a pile of if/elif branches — PE, NSO, and ELF are all
 just files under `spectrida/analysis/formats/`, discovered automatically. Run `spectrida formats`
