@@ -1,8 +1,6 @@
 <div align="center">
 
-# 👻 spectrIDA
-
-**Ghost through binaries.**
+<img src="assets/banner.png" alt="spectrIDA: ghost through binaries" width="100%">
 
 <sub>*Readers see a README. Reversers see more.*</sub>
 
