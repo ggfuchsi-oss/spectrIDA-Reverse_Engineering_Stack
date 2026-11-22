@@ -4,19 +4,14 @@
 
 **Ghost through binaries.**
 
-A local, AI-powered reverse engineering assistant: parallel IDA Pro analysis, AI function
-naming, a terminal that doesn't suck, a Neo4j knowledge graph of everything it's ever figured
-out, and an MCP server so Claude can search and chain through that graph directly.
+<sub>*Readers see a README. Reversers see more.*</sub>
 
-And now — with [phantomrt](#chapter-3--the-ghost-walks-through-walls) — it doesn't just read the
-walls. It walks through them: emulates, hooks, and fuzzes the functions it named, and writes what
-*actually happens* back onto the graph.
+IDA Pro, but parallel. Functions named by a local AI. A graph that remembers.
+And a ghost that runs the code to see what it really does.
+
+**No cloud. No telemetry. Runs entirely on your machine.**
 
 </div>
-
-```
-spectrida analyze GameAssembly.dll --workers 16
-```
 
 ```
 ◈  spectrIDA  ▸  GameAssembly.dll
@@ -28,498 +23,58 @@ spectrida analyze GameAssembly.dll --workers 16
   ████████████████████████████░░░░  89%  ~4s remaining
 ```
 
----
+## ⚡ Why
 
-## What it is
+IDA's auto-analysis is single-threaded. spectrIDA splits the binary into shards, runs them in
+parallel through idalib, and merges them back into one `.i64`.
 
-IDA Pro's auto-analysis is single-threaded. On a 34 MB il2cpp DLL that's *minutes*. spectrIDA splits
-the binary into N shards, runs them in parallel via idalib, merges into one `.i64`, then lets a
-fine-tuned 8B model **name every function** — all from one terminal UI with a cyberpunk theme and
-exactly the right amount of sarcasm.
+| binary | before | spectrIDA |
+|---|---|---|
+| Among Us DLL | ~4 hours | **67 s** |
+| Mario Odyssey `main.nso` (74,790 functions) | — | **198 s**, 90% named by demangling alone |
 
-That's Chapter 1, and it stands on its own: pure speed, no AI required if you don't want it.
+Then a fine-tuned 8B model names the `sub_*` leftovers, so 148,000 nameless functions become
+`network_send_packet` and friends overnight. Not perfect, but now you know where to look.
 
-Chapter 2 turns the output into something that outlives the session — a Neo4j graph an MCP client
-(Claude, [pi](https://pi.dev), whatever speaks MCP) can actually live in, instead of you
-copy-pasting decompiler output into a chat window one function at a time:
+<sub>Measured on a Ryzen 7 5800X3D + RTX 4070. Full tables and the bug horror stories: [docs/NUMBERS.md](docs/NUMBERS.md).</sub>
 
-```
-Binary  ─▶  Parallel IDA Analysis  ─▶  Demangle  ─▶  AI Naming  ─▶  Neo4j Graph  ─▶  MCP Server  ─▶  Claude
-              (N idalib shards)       (free, real)   (stripped     (persists,        (search/chain/
-                                                       leftovers     forever,          rename, live)
-                                                       only)         across sessions)
-```
-
-Chapter 3 ([phantomrt](#chapter-3--the-ghost-walks-through-walls)) adds the half that static
-tools never have: it **runs** the code. Emulates a function with no OS (works on binaries you
-can't even launch, like a Switch `.nso`), or hooks the live process, or fuzzes it — and stamps
-the verdict (`crashes` / `needs live state` / `clean`) onto the same graph node as the name.
-
-Full rundown, including what's still on the to-do pile, is down in
-[Chapter 2](#chapter-2--the-ghost-learns-to-talk-back) and
-[Chapter 3](#chapter-3--the-ghost-walks-through-walls).
-
-It is not Ghidra. It does one annoying thing (slow analysis + naming) fast, and it's genuinely fun
-to use. **199 downloads speak for themselves.**
-
-**No cloud. No telemetry. Runs entirely on your machine.**
-
----
-
-## Numbers
-
-| task | time |
-|------|------|
-| Among Us DLL — single-threaded IDA | ~4 hours |
-| Among Us DLL — spectrIDA (16 workers) | **67 seconds** |
-| 153,649 function binary — full naming pass | overnight |
-| Binary overview (what does this thing do?) | ~30 seconds |
-
-**Hardware these were measured on:** AMD Ryzen 7 5800X3D (8C/16T), 32 GB RAM, RTX 4070 12 GB.
-Different hardware moves the parallel-analysis numbers (more cores, more shards, faster); the
-naming numbers are mostly GPU-bound. The 4-hour/67-second Among Us figures predate Chapter 2 and
-aren't independently re-verified in every release — re-run `spectrida analyze` yourself if you
-want a number for your own machine and binary, results vary with shard density and binary size.
-
-Numbers actually re-verified during Chapter 2 development, same hardware:
-
-| binary | functions | task | time / result |
-|--------|-----------|------|----------------|
-| test_small.dll (PE) | 189 | parallel analysis, 4 workers, CLI | **6.4s** |
-| test_small.dll (PE) | 164 | full MCP pipeline (analyze + demangle + graph write) | **9.8s** |
-| main.nso — Mario Odyssey (NSO), 16 workers | 28,038 seed functions | parallel sharded scan phase | **54.5s** |
-| main.nso — Mario Odyssey (NSO), 16 workers | 74,790 total functions | + merge/full-analysis phase | **143.1s** |
-| main.nso — Mario Odyssey (NSO), 16 workers | 74,790 total functions | **end-to-end wall time** | **197.6s** |
-| main.nso — Mario Odyssey (NSO) | 74,790 | resolved via demangling alone (Itanium ABI, free, no AI) | 67,300 (90.0%) |
-
-That NSO row is the real equivalent of the old Among Us "4 hours → 67 seconds" claim, measured
-fresh this release on a 74,790-function Switch binary, no AI naming involved (demangling only —
-`populate=False`). The parallel phase (16 cores, ~55s) does the initial sharded discovery; the
-merge phase (~143s) is single-threaded by design — one IDA database, one writer — so if you watch
-Task Manager during that part and see 15 cores napping, that's not a bug report, that's physics.
-
-Getting an *honest* number here was its own small horror story. The first version of NSO support
-ran clean, exited 0, and proudly returned 727 functions for a binary that has roughly 75,000 of
-them — not a crash, just spectacularly, confidently wrong, which is somehow worse. Turns out IDA
-has no native NSO loader, so the file silently loaded as plain x86 ("metapc") even though the
-Switch has been ARM64 since the box launched. Every shard ran an x86 prologue scanner against pure
-AArch64 instructions and called whatever it accidentally matched a "function." Fixing the
-architecture fixed nothing on its own, because the binary was *also* still LZ4-compressed in
-memory — so half of what got scanned was, generously, noise. And even once it was properly
-decompressed and flagged AArch64, each shard was only hunting for call targets inside its own tiny
-slice of the binary, missing every call that crossed a shard boundary — which in a binary this
-size is most of them. Three bugs, one number, and not one of them had the decency to throw an
-exception. (We also tried shaving the merge phase down by skipping IDA's stack-frame analysis —
-got a beautiful speedup and a database where Hex-Rays politely refused to decompile half of it.
-That got reverted fast. Kept the much smaller, much safer FLIRT-signature skip instead, which is
-worth a shrug-worthy ~3% and didn't break anything, which by this point felt like a personality
-trait worth keeping.)
-
-**On naming accuracy:** it's not Ghidra-grade ground truth, it's an 8B model guessing from
-pseudocode. Generic helpers/getters tend to land well; deeply game-specific logic is more of a
-coin flip. Rename anything it gets wrong — that's why `rename_function` persists straight back
-into the graph.
-
----
-
-## Features
-
-- **Parallel sharded analysis** — splits into address-space shards, runs N idalib instances,
-  merges into one `.i64`. Workers configurable via flag, config, or env var.
-- **Pluggable format support** — PE, NSO (Switch), and ELF (`.so`/Linux) ship built-in; adding a
-  new one is a single file, no core changes. `spectrida formats` lists what's registered. See
-  [Adding a new binary format](#adding-a-new-binary-format).
-- **AI function naming** — fine-tuned Qwen3-8B runs locally via Ollama, streams names
-  token-by-token. Press `N`. Watch it think. Name appears.
-- **Batch naming** — `B` to name every `sub_*` function in the list. Walk away. Come back.
-- **Binary overview** — press `O` or run `spectrida overview file.i64`. Model reads 120
-  sampled function names and tells you what the binary does, what its subsystems are, and
-  anything security-relevant. Correctly identified a 153k-function IL2CPP runtime in 30 seconds.
-- **Call chain explorer** — `C` shows callers and callees. The model uses these as context
-  when naming — a function called by `Player$$TakeDamage` gets named better than one in isolation.
-- **Decompiler view** — `D` toggles Hex-Rays pseudocode.
-- **Export** — dump everything to JSON, CSV, IDA `.idc` script, or a symbols file.
-  The `.idc` applies all AI-generated names back into any IDA install in one click.
-- **Programmatic API** — `from spectrida.api import open_i64`. Drive everything from scripts,
-  notebooks, or Claude Code without touching the TUI.
-- **MCP server** — `spectrida install mcp` wires it straight into Claude Code and/or
-  [pi](https://pi.dev), no manual JSON editing. Claude can then search/read/chain through a
-  Neo4j-backed function graph (name, pseudocode, disassembly, callers/callees) and kick off a
-  fresh analysis on a new binary itself — `analyze_binary` runs the whole pipeline (parallel
-  analysis → demangle → AI naming → graph) from one tool call, as a background job it polls.
-  Works on PE and NSO. See [Chapter 2](#chapter-2--the-ghost-learns-to-talk-back) below.
-- **Demo mode** (`spectrida --demo`) — try the whole thing with **zero setup**. No IDA, no Ollama.
-- **A first-run wizard** — helps you install Ollama + the model, detects your IDA install
-  automatically, then never asks again.
-
----
-
-## Install
+## 🚀 Try it
 
 ```bash
 pip install spectrida
+spectrida --demo        # zero setup: no IDA, no Ollama
 ```
 
-Requirements: **IDA Pro 9.x** with idalib · **Python 3.10+** · **Ollama**
+The real thing needs **IDA Pro 9.x** (idalib), **Python 3.10+** and **Ollama**:
 
 ```bash
-# install Ollama (Windows)
-winget install Ollama.Ollama
-
-# pull the model (8.7 GB — go get coffee)
-ollama pull hf.co/gdfhhjk/spectrida-re-gguf:latest
-
-# first run — detects your IDA install and sets everything up
-spectrida onboard
-
-# or just try the demo right now
-spectrida --demo
+ollama pull hf.co/gdfhhjk/spectrida-re-gguf:latest   # 8.7 GB, go get coffee
+spectrida onboard                                    # finds your IDA, sets everything up
+spectrida analyze GameAssembly.dll --workers 16
 ```
 
----
+## 👻 Three chapters
 
-## Commands
-
-```bash
-# analyze a binary from scratch
-spectrida analyze GameAssembly.dll
-spectrida analyze GameAssembly.dll --workers 8    # custom worker count
-
-# open an existing .i64 in the browser
-spectrida open file.i64
-
-# ask the AI what this binary is
-spectrida overview file.i64
-spectrida overview file.i64 --addr 0x10001000 --addr 0x10353fd0  # include specific functions
-
-# export function names
-spectrida export file.i64 -f idc           # IDA script — apply names to any install
-spectrida export file.i64 -f json          # full dump with addresses + sizes
-spectrida export file.i64 -f csv           # spreadsheet
-spectrida export file.i64 -f symbols       # addr name pairs
-spectrida export file.i64 --named-only     # skip sub_* functions
-
-# check Ollama + model status
-spectrida serve
-
-# re-run the setup wizard
-spectrida onboard
-```
-
----
-
-## TUI keys
-
-| Key | Action |
-|-----|--------|
-| `N` | Name selected function — AI streams the result live |
-| `R` | Rename — pre-filled with the AI suggestion |
-| `D` | Toggle decompiled pseudocode (Hex-Rays) |
-| `C` | Call chain — callers and callees |
-| `B` | Batch-name all `sub_*` functions in the current list |
-| `O` | Overview — AI summary of the whole binary |
-| `/` | Fuzzy search |
-| `?` | Help |
-| `Q` | Quit |
-
----
-
-## Programmatic API
-
-No TUI needed — drive spectrIDA from scripts, Claude Code, notebooks, whatever:
-
-```python
-import asyncio
-from spectrida.api import open_i64
-
-async def main():
-    async with open_i64("GameAssembly.i64") as db:
-
-        # list all 153k functions
-        funcs = await db.list_functions()
-
-        # name one function — returns name + reasoning + confidence
-        result = await db.name_function(0x10001000)
-        print(result["new_name"])     # init_atexit_handler
-        print(result["reasoning"])    # allocates array of 3 fn ptrs, calls _atexit...
-
-        # batch name everything (with live progress)
-        async def on_progress(done, total, r):
-            print(f"  {done}/{total}  {r['old_name']} -> {r['new_name']}")
-
-        await db.batch_name(limit=500, rename=True, progress_cb=on_progress)
-
-        # ask what the binary does
-        overview = await db.overview()
-        print(overview)
-
-        # export to IDA script
-        await db.export("names.idc", fmt="idc", named_only=True)
-
-asyncio.run(main())
-```
-
----
-
-## The model
-
-[`hf.co/gdfhhjk/spectrida-re-gguf`](https://huggingface.co/gdfhhjk/spectrida-re-gguf) — Qwen3-8B
-fine-tuned for reverse engineering.
-
-**Trained on:**
-- x86/x64 assembly → function name pairs with call-chain context
-- Tool call traces from [`jtsylve/ida-mcp`](https://github.com/jtsylve/ida-mcp) — headless IDA with idalib
-- Extended context reasoning traces from a codebase context server
-
-**Training approach:** neuron-targeted SFT + GRPO. Only the RE-relevant neurons are tuned —
-base Qwen3 knowledge stays intact, you just added a very specific skill on top.
-
-Runs locally via Ollama. GGUF — works on CPU, GPU, or both.
-
----
-
-## Who is this for
-
-You're reversing something. You have a binary with 150,000 functions. Maybe 2,000 have names from
-metadata. The other 148,000 are `sub_XXXXXXXX`. You want to find the network code.
-You can't grep for it because nothing has a name yet.
-
-A human RE can name ~50-100 functions per hour if they're fast. At that rate, 150k functions = **3 years**.
-
-spectrIDA names them overnight. Not perfectly — maybe 70% accuracy on generic functions,
-much higher on patterns the model recognizes. But now instead of 148k `sub_` functions you have
-`network_send_packet`, `serialize_player_state`, `validate_checksum` — and you know where to look.
-
-It doesn't replace a skilled reverse engineer. It does the boring 80% so you can focus on the
-interesting 20%. It's the orientation layer.
-
-**Real use cases:**
-- Game modding — find the physics system in a 150k-function binary in minutes, not days
-- Security research — malware triage, understand a binary's architecture quickly
-- CTF — time pressure, need to know what you're looking at immediately
-- Anyone who has stared at `sub_140001234` for 20 minutes thinking *there has to be a better way*
-
----
-
-## Configuration
-
-`~/.spectrida/config.toml`:
-
-```toml
-[ida]
-idalib = "C:/Program Files/IDA Professional 9.1"
-output_dir = "~/.spectrida/output"
-
-[ollama]
-base_url = "http://localhost:11434"
-model = "spectrida-re"   # any ollama model name works
-
-[pipeline]
-workers = 16
-```
-
-Env var overrides: `SPECTRIDA_IDALIB` · `SPECTRIDA_MODEL` · `SPECTRIDA_WORKERS` · `SPECTRIDA_OLLAMA_URL`
-
----
-
-## Adding a new binary format
-
-Format support is a plugin system, not a pile of if/elif branches — PE, NSO, and ELF are all
-just files under `spectrida/analysis/formats/`, discovered automatically. Run `spectrida formats`
-to see what's currently registered.
-
-```bash
-$ spectrida formats
-ELF        spectrida.analysis.formats.elf.ELFHandler
-NSO        spectrida.analysis.formats.nso.NSOHandler
-PE         spectrida.analysis.formats.pe.PEHandler
-generic    spectrida.analysis.formats.generic.GenericHandler
-```
-
-A format handler's job is narrow — look at a file and say whether you own it, then describe its
-code layout. Everything else (sharding strategy, GPU prologue scanning, merging shards into one
-`.i64`) is handled once, generically, outside the format package. NSO is the full example: its
-LZ4 decompress + idaapi `mem2base`/`add_segm` logic already lived in `nso_loader.py` (the fix for
-the wrong-arch/still-compressed/locally-blind-entry-point bugs from Chapter 2's history) —
-`formats/nso.py` is a thin adapter exposing that existing, validated module through the
-`FormatHandler` contract, not a rewrite.
-
-**To add a format, drop one new file in `spectrida/analysis/formats/` and nothing else.** No
-edits to `parallel_analyze.py`, `shard_worker.py`, or the registry — it's picked up by scanning
-the directory for any module exposing a `HANDLER` instance.
-
-```python
-# spectrida/analysis/formats/myformat.py
-from spectrida.analysis.formats.base import FormatHandler, PreparedImage, Section
-
-class MyFormatHandler(FormatHandler):
-    name = "MYFMT"
-
-    @staticmethod
-    def sniff(header: bytes, path: str) -> bool:
-        return header[:4] == b"MYF0"          # however you recognize the format
-
-    def prepare(self, path: str, workdir: str) -> PreparedImage:
-        # Format idalib already loads natively (ELF, PE, Mach-O)? Just parse
-        # the section/segment table — return the original path unchanged.
-        return PreparedImage(
-            binary_path=path,
-            image_base=0,
-            sections=[Section(name=".text", va=0x1000, raw_off=0x400,
-                               raw_size=0x2000, vsize=0x2000, is_code=True)],
-            arch=None,        # set "x86_64"/"arm64" only if IDA can't detect it itself
-        )
-
-    # Only needed if idalib has NO native loader for this format (NSO is the
-    # example): do any manual idaapi/ida_segment setup here, called right
-    # after idapro.open_database() succeeds, before analysis starts.
-    # def post_open(self) -> None: ...
-
-HANDLER = MyFormatHandler()
-```
-
-That's the whole contract:
-
-| Method | Required? | What it does |
+| | what it does | how |
 |---|---|---|
-| `sniff(header, path)` | yes | Magic-byte/extension check — does this handler own the file? |
-| `prepare(path, workdir)` | yes | Return a `PreparedImage`: the file idalib should open + its section table |
-| `post_open()` | no (default no-op) | Manual segment setup for formats with no native IDA loader (see `nso.py`) |
-| `make_shard_binary(image, dst, va_start, va_end)` | no (default works) | Override only if zeroing out-of-shard section bytes is wrong for your format (see `nso.py` — never zero a compressed file) |
-| `code_range(image)` | no (default works) | Override only if "min/max of `is_code` sections" isn't the right answer |
-| `read_bytes(image, va_start, va_end)` | no (default works) | Override if `prepare()` already holds the relevant bytes in memory (NSO) instead of on disk |
-| `global_entry_points(image, text_start, text_end)` | no (default: None) | Only override if a per-shard local scan would miss real entry points — NSO needs this because AArch64 leaf functions are only discoverable via BL targets seen elsewhere in the binary, not a local prologue scan |
+| **1 · Read** | fast analysis + AI naming in a terminal UI that doesn't suck | `N` name · `B` batch · `O` overview · `C` call chain · `D` pseudocode |
+| **2 · Remember** | a Neo4j graph of everything it figured out + an MCP server, so Claude or [pi](https://pi.dev) can search, chain and rename | `spectrida install mcp` |
+| **3 · Run** | [phantomrt](phantomrt/): emulate, live-hook or fuzz a function, and stamp what *actually happens* on the graph | `pip install "spectrida[atlas]"` |
 
-Look at `formats/pe.py` for the simplest possible handler (pure header parsing, no overrides) and
-`formats/nso.py` for the full case (wraps decompression + manual segment setup + every override).
+Works on **PE**, **ELF** and Switch **NSO**. Adding a format is one file.
 
-Third-party packages can register a handler too, without touching spectrIDA's source at all, via
-the `spectrida.formats` entry-point group:
+## 📚 More
 
-```toml
-# in a separate package's pyproject.toml
-[project.entry-points."spectrida.formats"]
-myformat = "spectrida_myformat_plugin:HANDLER"
-```
-
-Test coverage for the format system lives in `tests/test_formats.py` — pure Python, no
-IDA/idalib required, so it runs in CI.
-
----
-
-## Chapter 2 — the ghost learns to talk back
-
-Chapter 1 was a faster, funnier IDA. Chapter 2 is spectrIDA as a teammate: a persistent,
-queryable knowledge graph of every function it's ever named, and an MCP server so Claude (or
-any MCP client — [pi](https://pi.dev) works too) can search and reason through it directly,
-instead of you copy-pasting decompiler output into a chat window.
-
-```bash
-spectrida install mcp
-```
-
-That's it. It registers the server with Claude Code and pi automatically (pulling in `mcp` +
-`neo4j` if a bare `pip install spectrida` skipped them), writes their config, and tells you
-which restart you owe it.
-
-**What Claude actually gets, once Neo4j is running (`spectrida` config `[graph]` section,
-or just point it at a local instance):**
-
-- `search_functions` / `get_function` / `get_callees` / `get_callers` / `trace_chain` — fast,
-  cached graph reads. `get_function` returns pseudocode **and** disassembly (exact instruction
-  boundaries and operands — the layer pseudocode can't give you, which matters the moment you
-  go from "what does this do" to "where exactly would I patch this") plus inline
-  callers/callees, so Claude decides whether to chain deeper by looking at whether a callee is
-  still `sub_*` right there in the response — no extra round trip just to find out there's
-  nothing more to see.
-- `get_full_pseudocode` / `rename_function` — live, authoritative reads/writes straight to the
-  `.i64` when the cached snippet isn't enough or a name is finally figured out.
-- `analyze_binary` — hand it a binary it's never seen (PE or NSO, parallel-sharded either way)
-  and it runs the whole pipeline — analyze → demangle (Itanium *and* MSVC) → AI-name the
-  genuinely stripped leftovers → push it all into the graph — as one background job you poll,
-  so a multi-minute run never blocks the conversation.
-- `doctor` / `start_all` — check or boot llama-server + Neo4j without leaving the chat.
-  If llama-server itself isn't installed anywhere, `start_all` grabs it via winget (Windows) or
-  brew (macOS) first — no separate llama.cpp download/setup needed.
-
-It's not magic — a function that's still `sub_140001234` because nobody's looked at it yet is
-still `sub_140001234`. But the graph remembers everything the model *has* figured out, forever,
-across sessions, and Claude can walk it like a colleague who already read the codebase instead
-of staring at one function at a time.
-
-**Still coming:**
-
-- **Deep context naming** — follow call trees N levels deep, feed the full chain to the model.
-  A function 3 hops from `encrypt_block` should know it's in the crypto path.
-- **Deobfuscation** — TigressVM pattern detection and handler tracing
-- **Actual patching** — the disassembly is in the graph now so an agent *can* plan a byte-level
-  patch; turning "here's the exact instruction to change" into "and here's the write" is next.
-
----
-
-## Chapter 3 — the ghost walks through walls
-
-Chapters 1 and 2 read the binary and remember it. But reading a function tells you what it *is*,
-never what it *does* when you pull the trigger. Chapter 3 — [**phantomrt**](https://pypi.org/project/phantomrt/) —
-pulls the trigger.
-
-```bash
-pip install "spectrida[atlas]"
-```
-
-It takes a function spectrIDA already named and does one of three haunted things to it:
-
-- **Emulate** it (Unicorn, no OS, any arch) — the only door that works on binaries you *can't*
-  launch, like a Switch `.nso` or an Android `.so`.
-- **Live-instrument** it (Frida) — attach to the *running* process and watch real args and return
-  values, for the functions emulation can only shrug at because they need real state.
-- **Fuzz** it — mutated inputs (seeds you bring, or ones it *carves out of the binary itself*),
-  catch the crashes, keep the reproducing input.
-
-Then it stamps the verdict onto the same Neo4j node as `dyn_*` properties, so the agent walking
-the graph sees the name **and** the behavior in one place. Six new MCP tools —
-`emulate_function`, `hunt_crashes`, `live_trace`, `dynamic_overview`, `risk_functions`,
-`learn_vm` — all backing the one graph. The reasoning corner is whatever LLM is driving; phantomrt
-just makes sure it has real runtime facts to reason with instead of vibes.
-
-```
-spectrIDA (names it)  ─▶  phantomrt (runs it)  ─▶  graph (dyn_status / crash / live args)  ─▶  the agent reasons
-```
-
-**And, in the spirit of the NSO horror story above:** the first real bug-hunt honestly found
-*nothing* — and the reason was more interesting than a crash would have been. Pointed at a
-genuinely old, genuinely vulnerable FreeType, blind fuzzing got zero. Coverage-guided fuzzing then
-reported a triumphant **64,000 edges** covered — which was a lie, because the binary was PIE and
-ASLR was quietly re-randomizing the addresses every run, so "new coverage" was mostly the loader
-shuffling the deck. Disable ASLR, honest number drops to a *real* 727 edges, and it plateaus
-there — because every seed was a TrueType font, so the fuzzer was trapped inside one parser and
-couldn't structurally mutate its way into the CFF/Type1/BDF code where the bugs actually live. The
-fix wasn't a smarter mutator, it was better seeds: the agent fetched real OpenType/Type1/BDF
-samples, coverage jumped 727 → 4,013 before a single fuzz iteration, and it explored properly.
-Still no crash in the budget — which is the honest state of a 3-minute run on one core versus a
-job that normally takes hours. The machinery is real. It caught its *own* fake number instead of
-reporting it. That's the whole point.
-
-**Honest ghost disclaimer:** phantomrt is `0.1.0`. Alpha. It's a solid dynamic layer, not a magic
-bug oracle — it found planted bugs in a toy target instantly, and on real targets it tells you
-honestly when it's stuck (`needs_state`), when a crash is only a *candidate* (go verify the
-pointer's actually input-controlled), and when it just needs more time and better seeds. Switch
-binaries don't run live — Frida needs something it can launch — so there, emulation is the only
-door and it'll say `needs_state` a lot. That's honest, not broken.
-
-It's the heavy extra on purpose (`torch`, `unicorn`, `frida`) — the base `pip install spectrida`
-pulls none of it. Source lives in [`phantomrt/`](phantomrt/); its own ghost-flavored README is
-[right there](phantomrt/README.md).
-
-*The static ghost names your functions. This one makes them confess.* 👻
-
----
+- [docs/USAGE.md](docs/USAGE.md): every command, the keys, the Python API, config, the model
+- [docs/CHAPTERS.md](docs/CHAPTERS.md): chapters 2 and 3 in full, and who this is for
+- [docs/FORMATS.md](docs/FORMATS.md): write your own format handler
+- [docs/NUMBERS.md](docs/NUMBERS.md): every measurement, and how we caught our own fake ones
 
 ## License
 
-MIT. Do whatever you want with it. If it works, cool.
-If it doesn't, blame the GGUF quantization.
+MIT. Do whatever you want with it. If it works, cool. If it doesn't, blame the GGUF quantization.
 
-Built with spite, coffee, and an RTX 4070.
-The model has 199 downloads with zero marketing. Each one adds 0.01% to development speed.
-(This is not true. But it's close.) 👻
+Built with spite, coffee, and an RTX 4070. 199 downloads with zero marketing. 👻
+
+<!-- the ghost left something behind. not in the docs. in the source tree, next to phantomrt's tests. -->
+<sub><code>52 45 56 45 4e 41 4e 43 45 3a 20 62 69 6e 61 72 79 20 2d 3e 20 73 6f 75 72 63 65 2e 20 32 30 32 37</code></sub>
