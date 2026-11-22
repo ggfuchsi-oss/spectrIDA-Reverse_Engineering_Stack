@@ -33,7 +33,7 @@ parallel through idalib, and merges them back into one `.i64`.
 | Among Us DLL | ~4 hours | **67 s** |
 | Mario Odyssey `main.nso` (74,790 functions) | — | **198 s**, 90% named by demangling alone |
 
-Then a fine-tuned 8B model names the `sub_*` leftovers, so 148,000 nameless functions become
+Then [a fine-tuned 8B model](https://huggingface.co/gdfhhjk/spectrida-re-gguf) (Qwen3-8B, runs locally) names the `sub_*` leftovers, so 148,000 nameless functions become
 `network_send_packet` and friends overnight. Not perfect, but now you know where to look.
 
 <sub>Measured on a Ryzen 7 5800X3D + RTX 4070. Full tables and the bug horror stories: [docs/NUMBERS.md](docs/NUMBERS.md).</sub>
